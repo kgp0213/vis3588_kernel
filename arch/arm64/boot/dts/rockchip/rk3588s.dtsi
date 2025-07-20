@@ -4493,7 +4493,7 @@
 		clock-names = "pclk_csi2host";
 		resets = <&cru SRST_P_CSI_HOST_0>;
 		reset-names = "srst_csihost_p";
-		status = "okay";
+		status = "disabled";
 	};
 
 	mipi1_csi2_hw: mipi1-csi2-hw@fdd20000 {
@@ -6407,6 +6407,7 @@
 		pinctrl-names = "gpio", "otpout";
 		pinctrl-0 = <&tsadc_gpio_func>;
 		pinctrl-1 = <&tsadc_shut>;
+		rockchip,grf = <&sys_grf>;
 		status = "disabled";
 	};
 
@@ -6648,7 +6649,7 @@
 
 		hdptxphy_hdmi_clk0: clk-port {
 			#clock-cells = <0>;
-			status = "okay";
+			status = "disabled";
 		};
 	};
 

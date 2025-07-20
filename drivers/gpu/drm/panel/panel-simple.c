@@ -5205,12 +5205,14 @@ static int panel_simple_dsi_of_get_desc_data(struct device *dev,
 	struct device_node *np = dev->of_node;
 	u32 val;
 	int err;
+	const struct drm_display_mode *mode;
+	const char *format_str = "Unknown";
 
 	err = panel_simple_of_get_firmware_desc_data(dev, &desc->desc);
 	if (!err) {
-		dev_info(dev, "found firmware desc data\n");
+		dev_info(dev,  "Using panel parameters from firmware\n");
 	} else {
-		dev_info(dev, "not found firmware desc data, using defaults\n");
+		dev_info(dev, "not found firmware,use device-tree config\n");
 		err = panel_simple_of_get_desc_data(dev, &desc->desc);
 		if (err)
 			return err;
@@ -5223,6 +5225,64 @@ static int panel_simple_dsi_of_get_desc_data(struct device *dev,
 	if (!of_property_read_u32(np, "dsi,lanes", &val))
 		desc->lanes = val;
 
+	/* Print all parameters in categorized format */
+	dev_info(dev, "===== Panel Configuration Summary =====\n");
+
+	/* 1. Basic Display Parameters */
+	if (desc->desc.modes && desc->desc.num_modes > 0) {
+		mode = &desc->desc.modes[0];
+		dev_info(dev, "[Display Timing]\n");
+		dev_info(dev, "  clock: %d kHz\n", mode->clock);
+		dev_info(dev, "  hdisplay: %d, vdisplay: %d\n",
+			 mode->hdisplay, mode->vdisplay);
+		dev_info(dev, "  hsync: start=%d end=%d len=%d\n",
+			 mode->hsync_start, mode->hsync_end,
+			 mode->hsync_end - mode->hsync_start);
+		dev_info(dev, "  hback-porch: %d, hfront-porch: %d\n",
+			 mode->htotal - mode->hsync_end,
+			 mode->hsync_start - mode->hdisplay);
+		dev_info(dev, "  vsync: start=%d end=%d len=%d\n",
+			 mode->vsync_start, mode->vsync_end,
+			 mode->vsync_end - mode->vsync_start);
+		dev_info(dev, "  vback-porch: %d, vfront-porch: %d\n",
+			 mode->vtotal - mode->vsync_end,
+			 mode->vsync_start - mode->vdisplay);
+	}
+
+	/* 2. Physical Characteristics */
+	dev_info(dev, "[Physical Properties]\n");
+	dev_info(dev, "  width: %d mm, height: %d mm\n",
+		 desc->desc.size.width, desc->desc.size.height);
+	/* 3. DSI Specific Parameters */
+	dev_info(dev, "[DSI Parameters]\n");
+	dev_info(dev, "  dsi,flags: 0x%lx\n", desc->flags);
+
+	/* Manual mapping for DSI pixel format */
+	switch (desc->format) {
+	case MIPI_DSI_FMT_RGB888: format_str = "RGB888"; break;
+	case MIPI_DSI_FMT_RGB666: format_str = "RGB666"; break;
+	case MIPI_DSI_FMT_RGB666_PACKED: format_str = "RGB666 (Packed)"; break;
+	case MIPI_DSI_FMT_RGB565: format_str = "RGB565"; break;
+	}
+	dev_info(dev, "  dsi,format: %d (%s)\n", desc->format, format_str);
+	dev_info(dev, "  dsi,lanes: %d\n", desc->lanes);
+
+	/* 4. Power Sequence */
+	dev_info(dev, "[Power Sequence]\n");
+	dev_info(dev, "  prepare: %d ms, enable: %d ms\n",
+		 desc->desc.delay.prepare, desc->desc.delay.enable);
+	dev_info(dev, "  disable: %d ms, unprepare: %d ms\n",
+		 desc->desc.delay.disable, desc->desc.delay.unprepare);
+	dev_info(dev, "  reset: %d ms, init: %d ms\n",
+		 desc->desc.delay.reset, desc->desc.delay.init);
+
+	/* 5. Command Sequences (if exist) */
+	if (desc->desc.init_seq) {
+		dev_info(dev, "[Init Sequence] %d commands\n",
+			 desc->desc.init_seq->cmd_cnt);
+	}
+
+	dev_info(dev, "======================================\n");
 	return 0;
 }
 

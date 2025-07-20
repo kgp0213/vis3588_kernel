@@ -783,7 +783,7 @@
 
 		hdptxphy_hdmi_clk1: clk-port {
 			#clock-cells = <0>;
-			status = "okay";
+			status = "disabled";
 		};
 	};
 

@@ -437,7 +437,7 @@ rk860x_parse_dt(struct device *dev, struct device_node *np,
 	pdata->vsel_gpio = devm_gpiod_get_index_optional(dev, "vsel", 0, flag);
 	if (IS_ERR(pdata->vsel_gpio)) {
 		ret = PTR_ERR(pdata->vsel_gpio);
-		dev_err(dev, "failed to get vesl gpio (%d)\n", ret);
+		dev_err(dev, "failed to get vsel gpio (%d)\n", ret);
 		pdata->vsel_gpio = NULL;
 	}
 

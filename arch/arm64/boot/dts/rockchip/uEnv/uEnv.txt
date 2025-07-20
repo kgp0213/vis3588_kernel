@@ -2,10 +2,10 @@ uname_r=
 size=0x1000000
 cmdline="earlyprintk console=ttyFIQ0 console=tty1 consoleblank=0 loglevel=7 rootwait rw rootfstype=ext4"
 
-enable_uboot_overlays=0
+enable_uboot_overlays=1
 #overlay_start
 
-#dtoverlay=/dtb/overlay/rk35xx-lubancat-xxx-overlay.dtbo
-#dtoverlay=/dtb/overlay/rk35xx-lubancat-xxx-overlay.dtbo
+dtoverlay  =/dtb/overlay/vis-dsi0-vp2-cmd-4lane-m559.dtbo
+#dtoverlay =/dtb/overlay/vis-dsi0-vp2-cmd-8lane-c39.dtbo
 
 #overlay_end
