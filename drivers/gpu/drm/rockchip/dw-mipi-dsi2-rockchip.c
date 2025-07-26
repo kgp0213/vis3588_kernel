@@ -1359,10 +1359,153 @@ static irqreturn_t dw_mipi_dsi2_te_irq_handler(int irq, void *dev_id)
 
 	return IRQ_HANDLED;
 }
+struct entry {
+    u32 offset;
+    u32 length;
+};
+/**
+ * @magic: LCD config firmware magic number.
+ * @vendor: LCD vendor name.
+ * @model: LCD model name.
+ * @version: LCD config firmware version.
+ * @timing_entry: Entry of timing table.
+ * @init_seq_entry: Entry of init sequence.
+ * @eixt_seq_entry: Entry of exit sequence.
+ * @touchscreen_entry: Entry of touchscreen properties.
+ * @firmware_size: Firmware size.
+ */
+struct firmware_header {
+	u32 magic;
+    u8 vendor[16];
+    u8 model[16];
+    u8 version[8];
+    struct entry timing_entry;
+    struct entry init_seq_entry;
+	struct entry eixt_seq_entry;
+	struct entry touchscreen_entry;
+	struct entry vesa_dsc_entry;
+	struct entry other_info_entry;
+	u32 firmware_size;
+};
+static int dw_mipi_dsi2_get_dsc_params_from_firmware(const char *fw_path,struct device *dev,
+				struct dw_mipi_dsi2 *dsi2,const u8 **init_seq_data,int *init_seq_len)
+{
+    struct file *fp;
+    struct firmware_header *header;
+    const u8 *dsc_data;
+    loff_t pos = 0;
+    int ret;
+
+    /* 1. 打开文件 */
+    dev_info(dev, "=========dw_mipi_dsi2_get_dsc_params_from_firmware=========");
+    dev_info(dev, "Loading DSC config from: %s\n", fw_path);
+    fp = filp_open(fw_path, O_RDONLY, 0);
+    if (IS_ERR(fp)) {
+        dev_err(dev, "Can't open %s: err=%ld\n", fw_path, PTR_ERR(fp));
+        return PTR_ERR(fp);
+    }
+
+    /* 2. 分配并读取文件头 */
+    header = (struct firmware_header *)devm_kzalloc(dev, sizeof(*header), GFP_KERNEL);
+    if (!header) {
+        ret = -ENOMEM;
+        goto err_close;
+    }
+
+    ret = kernel_read(fp, header, sizeof(*header), &pos);
+    if (ret < 0) {
+        dev_err(dev, "Failed to read firmware header: %d\n", ret);
+        goto err_close;
+    }
+
+    /* 3. 校验固件有效性 */
+    if (header->magic != 0xA5A55A5A || header->firmware_size <= 0) {
+        dev_err(dev, "Invalid firmware: magic=0x%x, size=%u\n",
+               header->magic, header->firmware_size);
+        ret = -EINVAL;
+        goto err_close;
+    }
+
+    dev_info(dev, "firmware magic: %x\n", header->magic);
+    dev_info(dev, "firmware version: %.*s, size: %d\n",8,
+             header->version, header->firmware_size);
+
+    /* 4. 检查VESA DSC条目 */
+    if (header->vesa_dsc_entry.length < 16) {
+        dev_err(dev, "Invalid VESA DSC entry length: %d\n", header->vesa_dsc_entry.length);
+        ret = -EINVAL;
+        goto err_close;
+    }
+
+    /* 5. 读取DSC数据 */
+    dsc_data = devm_kzalloc(dev, header->vesa_dsc_entry.length, GFP_KERNEL);
+    if (!dsc_data) {
+        ret = -ENOMEM;
+        goto err_close;
+    }
+
+    pos = header->vesa_dsc_entry.offset;
+    ret = kernel_read(fp, (void *)dsc_data, header->vesa_dsc_entry.length, &pos);
+    if (ret < 0) {
+        dev_err(dev, "Failed to read VESA DSC data: %d\n", ret);
+        goto err_close;
+    }
+
+    /* 6. 解析DSC参数 */
+    dsi2->c_option = dsc_data[0] != 0;
+    dsi2->scrambling_en = dsc_data[1] != 0;
+    dsi2->dsc_enable = dsc_data[2] != 0;
+    dsi2->version_major = dsc_data[3];
+    dsi2->version_minor = dsc_data[4];
+
+    /* 字节5-7未使用 */
+
+    /* 读取slice_width (字节8-11, 小端格式) */
+    dsi2->slice_width = get_unaligned_le32(&dsc_data[8]);
+
+    /* 读取slice_height (字节12-15, 小端格式) */
+    dsi2->slice_height = get_unaligned_le32(&dsc_data[12]);
+
+    /* 7. 打印解析结果 */
+    dev_info(dev, "DSC params from firmware:\n");
+    dev_info(dev, "  c_option: %d\n", dsi2->c_option);
+    dev_info(dev, "  scrambling_en: %d\n", dsi2->scrambling_en);
+    dev_info(dev, "  dsc_enable: %d\n", dsi2->dsc_enable);
+    dev_info(dev, "  version: %d.%d\n", dsi2->version_major, dsi2->version_minor);
+    dev_info(dev, "  slice: %dx%d\n", dsi2->slice_width, dsi2->slice_height);
+
+	/* 读取panel-init-sequence*/
+	dev_info(dev, "VESA DSC entry: offset=%u, length=%u\n",
+        header->vesa_dsc_entry.offset, header->vesa_dsc_entry.length);
+    if (init_seq_data && init_seq_len &&
+        header->init_seq_entry.length > 60) {
+        *init_seq_data = devm_kzalloc(dev, header->init_seq_entry.length, GFP_KERNEL);
+        if (!*init_seq_data) {
+            ret = -ENOMEM;
+            goto err_close;
+        }
+
+        pos = header->init_seq_entry.offset;
+        ret = kernel_read(fp, (void *)*init_seq_data,
+                         header->init_seq_entry.length, &pos);
+        if (ret < 0) {
+            dev_err(dev, "Failed to read init sequence: %d\n", ret);
+            goto err_close;
+        }
+        *init_seq_len = header->init_seq_entry.length;
+    }
+
+    filp_close(fp, NULL);
+    return 0;
+
+err_close:
+    filp_close(fp, NULL);
+    return ret;
+}
 
 static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 						 struct drm_panel *panel,
-						 struct drm_bridge *bridge)
+						 struct drm_bridge *bridge,struct device *dev)
 {
 	struct drm_dsc_picture_parameter_set *pps = NULL;
 	struct device_node *np = NULL;
@@ -1370,7 +1513,11 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 	const void *data;
 	char *d;
 	uint8_t *dsc_packed_pps;
-	int len;
+	int len,ret,gpio_value;
+	int init_seq_len = 0;
+	const u8 *init_seq_data = NULL;
+	const char *fw_path = "/lib/firmware/vis-timing.bin";
+	u16 pic_width;
 
 	if (!panel && !bridge)
 		return -ENODEV;
@@ -1380,24 +1527,98 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 	else
 		np = bridge->of_node;
 
-	dsi2->c_option = of_property_read_bool(np, "phy-c-option");
-	dsi2->scrambling_en = of_property_read_bool(np, "scrambling-enable");
-	dsi2->dsc_enable = of_property_read_bool(np, "compressed-data");
+	{//防止dsc参数卡死，导致系统卡死，如果卡死，则通过按住指定按键，在屏幕驱动加载的时候跳过加载DSC参数
+		int dsc_det_gpio;
+		enum of_gpio_flags flags;
+		dev_info(dev, "start detect GPIO for block dsc params in panel bin\n");
+		// 1. 查找GPIO配置节点
+		np = of_find_node_by_name(NULL, "no-dsc-gpio");
+		if (!np) {
+			dev_warn(dsi2->dev, "No DSC GPIO node found, using fallback\n");
+			dsc_det_gpio = 108; // 默认GPIO108
+		} else {
+			// 2. 从节点获取GPIO配置
+			dsc_det_gpio = of_get_named_gpio_flags(np, "nodsc-pin", 0, &flags);
+			of_node_put(np); // 减少引用计数
 
-	if (dsi2->slave) {
-		dsi2->slave->c_option = dsi2->c_option;
-		dsi2->slave->scrambling_en = dsi2->scrambling_en;
-		dsi2->slave->dsc_enable = dsi2->dsc_enable;
-	}
+			if (dsc_det_gpio < 0) {
+				dev_err(dsi2->dev, "Invalid GPIO in no-dsc-gpio node, using fallback\n");
+				dsc_det_gpio = 108;
+			}
+		}
+		dev_info(dsi2->dev, "Using GPIO%d (flags: 0x%x) for DSC detection\n",dsc_det_gpio, flags);
 
-	if (!dsi2->dsc_enable)
+		// 3. 请求GPIO
+		ret = gpio_request(dsc_det_gpio, "dsc_det_gpio");
+		if (ret) {
+			dev_err(dsi2->dev, "Failed to request GPIO %d: %d\n", dsc_det_gpio, ret);
+			// 或处理错误
+		}
+
+		// 4. 配置GPIO方向
+		ret = gpio_direction_input(dsc_det_gpio);
+		if (ret) {
+			dev_err(dsi2->dev, "Failed to set GPIO%d direction: %d\n", dsc_det_gpio, ret);
+			goto err_free_gpio;
+		}
+
+		// 5. 读取GPIO值
+		gpio_value = gpio_get_value(dsc_det_gpio);
+		dev_info(dsi2->dev, "GPIO%d state: %s (raw: %d)\n",
+					dsc_det_gpio, gpio_value ? "HIGH" : "LOW", gpio_get_value(dsc_det_gpio));
+
+		if (gpio_value == 0) {
+			dev_info(dsi2->dev, "DSC detection: GPIO is LOW (button pressed?)\n");
+		} else {
+			dev_info(dsi2->dev, "DSC detection: GPIO is HIGH (button released)\n");
+		}
+
+		err_free_gpio:
+    	// 7. 释放GPIO
+    	gpio_free(dsc_det_gpio);
+    }
+	if (gpio_value == 0){
+		dsi2->dsc_enable = false;
+		if (dsi2->slave)
+			dsi2->slave->dsc_enable = false;
+		dev_info(dsi2->dev, "DSC feature will be disabled\n");
+		return 0;
+	}//防止dsc参数卡死，导致系统卡死
+
+	// 尝试从固件bin文件读取DSC参数
+	ret = dw_mipi_dsi2_get_dsc_params_from_firmware(fw_path,dsi2->dev, dsi2,
+	 							&init_seq_data,&init_seq_len);
+    if (ret) {
+        // 如果从固件读取失败，则回退到从设备树读取
+        dev_info(dsi2->dev, "Failed to get DSC params from firmware, fallback to DT\n");
+
+        dsi2->c_option = of_property_read_bool(np, "phy-c-option");
+        dsi2->scrambling_en = of_property_read_bool(np, "scrambling-enable");
+        dsi2->dsc_enable = of_property_read_bool(np, "compressed-data");
+
+        if (dsi2->slave) {
+            dsi2->slave->c_option = dsi2->c_option;
+            dsi2->slave->scrambling_en = dsi2->scrambling_en;
+            dsi2->slave->dsc_enable = dsi2->dsc_enable;
+        }
+        if (!dsi2->dsc_enable)
+            return 0;
+
+        of_property_read_u32(np, "slice-width", &dsi2->slice_width);
+        of_property_read_u32(np, "slice-height", &dsi2->slice_height);
+        of_property_read_u8(np, "version-major", &dsi2->version_major);
+        of_property_read_u8(np, "version-minor", &dsi2->version_minor);
+    }
+    else if (dsi2->slave) {//如果成功从固件读取，再判断是否双port
+        dsi2->slave->c_option = dsi2->c_option;
+        dsi2->slave->scrambling_en = dsi2->scrambling_en;
+        dsi2->slave->dsc_enable = dsi2->dsc_enable;
+    }
+
+	if (!dsi2->dsc_enable) //DSC 未开启就直接返回
 		return 0;
 
-	of_property_read_u32(np, "slice-width", &dsi2->slice_width);
-	of_property_read_u32(np, "slice-height", &dsi2->slice_height);
-	of_property_read_u8(np, "version-major", &dsi2->version_major);
-	of_property_read_u8(np, "version-minor", &dsi2->version_minor);
-
+	if (ret || !init_seq_data) {//下面开始解析设备树里面的初始化代码
 	data = of_get_property(np, "panel-init-sequence", &len);
 	if (!data)
 		return -EINVAL;
@@ -1422,21 +1643,57 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 
 			pps = (struct drm_dsc_picture_parameter_set *)dsc_packed_pps;
 			break;
+			//这里识别到MIPI_DSI_PICTURE_PARAMETER_SET即0A 代码行后开始提取pps数据
 		}
 
 		d += header->payload_length;
 		len -= header->payload_length;
 	}
+	}else {/* 使用从固件获取的init sequence数据 */
+		d = (char *)init_seq_data;
+		len = init_seq_len;
+		dev_info(dev, "found init_seq_data,length is %d\n", len);
+		while (len > sizeof(*header)) {
+			header = (struct cmd_header *)d;
+			dev_dbg(dev, "Checking header: type=0x%02x, delay=%u, payload_len=%u\n",
+           		header->cmd_type, header->delay, header->payload_length);
+			d += sizeof(*header);
+			len -= sizeof(*header);
 
-	if (!pps) {
+			if (header->payload_length > len)
+				return -EINVAL;
+
+			if (header->cmd_type == MIPI_DSI_PICTURE_PARAMETER_SET) {
+				uint8_t *dsc_packed_pps = devm_kmemdup(dev, d,
+										header->payload_length, GFP_KERNEL);
+				dev_dbg(dev, "Found PPS header\n");
+				if (!dsc_packed_pps)
+					return -ENOMEM;
+
+				pps = (struct drm_dsc_picture_parameter_set *)dsc_packed_pps;
+
+				dev_info(dev, "data packet 0A, DSC Version: 1.%d\n", pps->dsc_version & 0xF);
+				dev_info(dev, "data packet 0A, Slice Size: %dx%d\n",be16_to_cpu(pps->slice_width),
+					be16_to_cpu(pps->slice_height));
+				break;
+			}
+			d += header->payload_length;
+			len -= header->payload_length;
+		}
+	}
+
+	if (!pps) {//但是如果用户开启了DSC，但是初始化代码里面又没有放0A 代码行的话就会导致系统卡死
 		dev_err(dsi2->dev, "not found dsc pps definition\n");
+		dsi2->dsc_enable = false;
+		if (dsi2->slave)
+			dsi2->slave->dsc_enable = false;
 		return -EINVAL;
 	}
 
 	dsi2->pps = pps;
 
 	if (dsi2->slave) {
-		u16 pic_width = be16_to_cpu(pps->pic_width) / 2;
+		pic_width = be16_to_cpu(pps->pic_width) / 2;
 
 		dsi2->pps->pic_width = cpu_to_be16(pic_width);
 		dev_info(dsi2->dev, "dsc pic_width change from %d to %d\n",
@@ -1512,12 +1769,16 @@ static int dw_mipi_dsi2_bind(struct device *dev, struct device *master,
 
 	dsi2->drm_dev = drm_dev;
 	ret = dw_mipi_dsi2_dual_channel_probe(dsi2);
-	if (ret)
-		return ret;
+	if (ret){
+		DRM_DEV_INFO(dev, "Dual-channel probe err (slave not ready): %d\n", ret);
+		return ret;}
 
-	if (dsi2->master)
-		return 0;
+	if (dsi2->master) {
+        DRM_DEV_INFO(dev, "Dual-channel, dsi2->master done. \n");
+        return 0;
+    }
 
+	DRM_DEV_INFO(dev, "Trying to find panel or bridge...\n");
 	ret = drm_of_find_panel_or_bridge(dev->of_node, 1, -1,
 					  &dsi2->panel, &dsi2->bridge);
 	if (ret) {
@@ -1525,9 +1786,23 @@ static int dw_mipi_dsi2_bind(struct device *dev, struct device *master,
 		return ret;
 	}
 
-	dw_mipi_dsi2_get_dsc_params_from_sink(dsi2, dsi2->panel, dsi2->bridge);
+	if (dsi2->panel) {
+		DRM_DEV_INFO(dev, "Found panel: %s\n", dev_name(dsi2->panel->dev));
+	} else if (dsi2->bridge) {
+		struct device *bridge_dev = dev;
+		if (dsi2->bridge->dev)
+			 bridge_dev = (struct device *)dsi2->bridge->dev;  // 显式转换
+		DRM_DEV_INFO(dev, "Found bridge: %s\n", dev_name(bridge_dev));
+	}
+	DRM_DEV_INFO(dev, "Trying to get dsc params from sink\n");
+	dw_mipi_dsi2_get_dsc_params_from_sink(dsi2, dsi2->panel, dsi2->bridge,dev);
 	encoder->possible_crtcs = rockchip_drm_of_find_possible_crtcs(drm_dev,
 								      of_node);
+	if (dsi2->dsc_enable) {
+        DRM_DEV_INFO(dev, "DSC enabled (slice: %dx%d, version: %d.%d)\n",
+                    dsi2->slice_width, dsi2->slice_height,
+                    dsi2->version_major, dsi2->version_minor);
+    }
 
 	ret = drm_simple_encoder_init(drm_dev, encoder, DRM_MODE_ENCODER_DSI);
 	if (ret) {
@@ -1578,6 +1853,13 @@ static int dw_mipi_dsi2_bind(struct device *dev, struct device *master,
 	if (dsi2->slave)
 		pm_runtime_enable(dsi2->slave->dev);
 
+	if (dsi2->slave) {
+		DRM_DEV_INFO(dev, "Dual-channel ready (master:%s + slave:%s)\n",
+                    		dev_name(dev), dev_name(dsi2->slave->dev));
+    } else {
+		DRM_DEV_INFO(dev, "Running in SINGLE-channel mode (lanes: %d)\n",dsi2->lanes);
+        DRM_DEV_INFO(dev, "Initialized in %s mode\n",dw_mipi_dsi2_is_cmd_mode(dsi2) ? "CMD" : "VIDEO");
+    }
 	return 0;
 
 encoder_cleanup:

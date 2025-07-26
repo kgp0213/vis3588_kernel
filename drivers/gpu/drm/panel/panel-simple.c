@@ -182,12 +182,14 @@ struct entry {
 struct firmware_header {
 	u32 magic;
     u8 vendor[16];
-    u8 model[32];
+    u8 model[16];
     u8 version[8];
     struct entry timing_entry;
     struct entry init_seq_entry;
 	struct entry eixt_seq_entry;
 	struct entry touchscreen_entry;
+	struct entry vesa_dsc_entry;
+	struct entry other_info_entry;
 	u32 firmware_size;
 };
 
@@ -4707,6 +4709,164 @@ static bool of_child_node_is_present(const struct device_node *node,
 	return !!child;
 }
 
+static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,struct device *dev,
+					   struct panel_desc *desc)
+{
+    struct device_node *np = dev->of_node; // 从dev获取设备树节点
+    struct file *fp;
+    struct firmware_header *header;
+    struct drm_display_mode *mode;
+    struct videomode *vm;
+    const u8 *init_data , *exit_data ;
+    u32 bus_flags;
+    loff_t pos = 0;
+    int ret;
+
+	/* 1. 打开文件 */
+	dev_info(dev, "==============================================");
+	dev_info(dev, "Loading panel config from: %s\n", file_path);
+    fp = filp_open(file_path, O_RDONLY, 0);
+    if (IS_ERR(fp)) {
+		dev_err(dev, "Can't open %s: err=%ld (path exists? mounted? perm?)\n",file_path, PTR_ERR(fp));
+        return PTR_ERR(fp);
+    }
+    header = (struct firmware_header *)devm_kzalloc(dev, sizeof(*header), GFP_KERNEL);
+	if (!header){
+        ret= -ENOMEM;
+        goto err_close;
+    }
+
+    /* 2. 读取文件头 */
+    ret = kernel_read(fp, header, sizeof(*header), &pos);
+    if (ret < 0) {
+        dev_err(dev, "Failed to read firmware header: %d\n", ret);
+        goto err_close;
+    }
+
+    /* 3. 校验固件有效性 */
+    if (header->magic != 0xA5A55A5A || header->firmware_size <= 0) {
+        dev_err(dev, "Invalid firmware: magic=0x%x, size=%u\n",
+               header->magic, header->firmware_size);
+        ret = -EINVAL;
+        goto err_close;
+    }
+    if (header->firmware_size < sizeof(*header)) {
+        dev_err(dev, "Invalid firmware size: %u < %zu\n",
+            header->firmware_size, sizeof(*header));
+        ret = -EINVAL;
+        goto err_close;
+    }
+    /* 4. 打印关键信息（完全匹配原函数格式） */
+    dev_info(dev, "panel firmware magic: %x\n", header->magic);
+    dev_info(dev, "panel firmware version: %.*s, size: %d\n", 8 ,header->version, header->firmware_size);
+    dev_info(dev, "panel vendor: %.*s, model: %.*s\n", 16 ,header->vendor, 16 ,header->model);
+
+    vm = (struct videomode *)devm_kzalloc(dev, sizeof(*vm), GFP_KERNEL);
+    if (!vm){
+		ret= -ENOMEM;
+        goto err_close;}
+
+    /*  读取时序数据 */
+    if (header->timing_entry.length != sizeof(*vm)) {
+        dev_err(dev, "Invalid timing data size: expected %zu, got %u\n", sizeof(*vm), header->timing_entry.length);
+        ret = -EINVAL;
+        goto err_close;
+    }
+    pos = header->timing_entry.offset;
+    ret = kernel_read(fp, vm, sizeof(*vm), &pos);
+    if (ret != sizeof(*vm)) {
+        dev_err(dev, "Failed to read timing data: %d\n", ret);
+        goto err_close;
+    }
+
+    /* 读取初始化序列（devm自动释放） */
+    init_data = (const u8 *)devm_kzalloc(dev, header->init_seq_entry.length, GFP_KERNEL);
+    if (!init_data) {
+        ret = -ENOMEM;
+        goto err_close;
+    }
+    pos = header->init_seq_entry.offset;
+    ret = kernel_read(fp, (void *)init_data, header->init_seq_entry.length, &pos);
+    if (ret < 0) {
+        dev_err(dev, "Failed to read init sequence: %d\n", ret);
+        goto err_close;
+    }
+
+    /*读取关闭序列（devm自动释放） */
+    exit_data = (const u8 *)devm_kzalloc(dev, header->eixt_seq_entry.length, GFP_KERNEL);
+    if (!exit_data) {
+        ret = -ENOMEM;
+        goto err_close;
+    }
+
+    pos = header->eixt_seq_entry.offset;
+    ret = kernel_read(fp, (void *)exit_data, header->eixt_seq_entry.length, &pos);
+    if (ret < 0) {
+        dev_err(dev, "Failed to read exit sequence: %d\n", ret);
+        goto err_close;
+    }
+
+    /* 分配模式内存（使用devm自动管理） */
+    mode = (struct drm_display_mode*)devm_kzalloc(dev, sizeof(*mode), GFP_KERNEL);
+    if (!mode) {
+        ret = -ENOMEM;
+        goto err_close;
+    }
+
+    drm_display_mode_from_videomode(vm, mode);
+    drm_bus_flags_from_videomode(vm, &bus_flags);
+
+    /* 填充panel_desc */
+    desc->modes = mode;
+    desc->num_modes = 1;
+    desc->bus_flags = bus_flags;
+    /* 从设备树读取delay参数 */
+    of_property_read_u32(np, "prepare-delay-ms", &desc->delay.prepare);
+    of_property_read_u32(np, "enable-delay-ms", &desc->delay.enable);
+    of_property_read_u32(np, "disable-delay-ms", &desc->delay.disable);
+    of_property_read_u32(np, "unprepare-delay-ms", &desc->delay.unprepare);
+    of_property_read_u32(np, "reset-delay-ms", &desc->delay.reset);
+    of_property_read_u32(np, "init-delay-ms", &desc->delay.init);
+
+    /* 解析命令序列 */
+    desc->init_seq = devm_kzalloc(dev, sizeof(*desc->init_seq), GFP_KERNEL);
+    if (!desc->init_seq) {
+        ret = -ENOMEM;
+        goto err_close;
+    }
+    ret = panel_simple_parse_cmd_seq(dev, init_data, header->init_seq_entry.length,desc->init_seq);
+    if (ret) {
+        dev_err(dev, "Failed to parse init sequence\n");
+        goto err_close;
+    }
+
+    if (init_data) {
+        devm_kfree(dev, (void *)init_data);
+        init_data = NULL;
+    }
+    desc->exit_seq = devm_kzalloc(dev, sizeof(*desc->exit_seq), GFP_KERNEL);
+    if (!desc->exit_seq) {
+        ret = -ENOMEM;
+        goto err_close;
+    }
+
+    ret = panel_simple_parse_cmd_seq(dev, exit_data, header->eixt_seq_entry.length,desc->exit_seq);
+    if (ret) {
+        dev_err(dev, "Failed to parse exit sequence\n");
+        goto err_close;
+    }
+    if (exit_data) {
+        devm_kfree(dev, (void *)exit_data);
+        exit_data = NULL;
+    }
+    filp_close(fp, NULL);
+    return 0;
+
+err_close:
+    filp_close(fp, NULL);
+    return ret;
+}
+/*
 static int panel_simple_of_get_firmware_desc_data(struct device *dev,
 					   struct panel_desc *desc)
 {
@@ -4820,7 +4980,7 @@ static int panel_simple_of_get_firmware_desc_data(struct device *dev,
 
 	return 0;
 }
-
+*/
 static int panel_simple_of_get_desc_data(struct device *dev,
 					 struct panel_desc *desc)
 {
@@ -5207,12 +5367,13 @@ static int panel_simple_dsi_of_get_desc_data(struct device *dev,
 	int err;
 	const struct drm_display_mode *mode;
 	const char *format_str = "Unknown";
+	const char *fw_path = "/lib/firmware/vis-timing.bin";
 
-	err = panel_simple_of_get_firmware_desc_data(dev, &desc->desc);
+	err = panel_simple_of_get_firmware_desc_data_binfile(fw_path,dev, &desc->desc);
 	if (!err) {
 		dev_info(dev,  "Using panel parameters from firmware\n");
 	} else {
-		dev_info(dev, "not found firmware,use device-tree config\n");
+		dev_info(dev, "not found firmware or Bad firmware,use device-tree config\n");
 		err = panel_simple_of_get_desc_data(dev, &desc->desc);
 		if (err)
 			return err;
@@ -5224,6 +5385,10 @@ static int panel_simple_dsi_of_get_desc_data(struct device *dev,
 		desc->format = val;
 	if (!of_property_read_u32(np, "dsi,lanes", &val))
 		desc->lanes = val;
+	if (!of_property_read_u32(np, "size,width", &val))
+		desc->desc.size.width = val;
+	if (!of_property_read_u32(np, "size,height", &val))
+		desc->desc.size.height = val;
 
 	/* Print all parameters in categorized format */
 	dev_info(dev, "===== Panel Configuration Summary =====\n");

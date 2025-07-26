@@ -71,17 +71,38 @@
         };
 	};
 
-	adc_keys: adc-keys {
-		compatible = "adc-keys";
-		io-channels = <&saradc 1>;
-		io-channel-names = "buttons";
-		keyup-threshold-microvolt = <1800000>;
-		poll-interval = <100>;
+	no_dsc_gpio: no-dsc-gpio {
+        compatible = "gpio-no-dsc-params";
+        nodsc-pin = <&gpio3 RK_PB4 GPIO_ACTIVE_LOW>;
+    };
 
+	adc_keys: adc-keys {
+		status = "okay";
+		compatible = "adc-keys";
+		io-channels = <&saradc 1>;              // 使用 SARADC 通道 1
+		io-channel-names = "buttons";
+		keyup-threshold-microvolt = <1800000>;  // 按键释放的电压阈值（1.8V）
+		poll-interval = <100>;                  // 轮询间隔（100ms）
+
+		down {
+		label = "down";
+		linux,code = <KEY_DOWN>;
+		press-threshold-microvolt = <395600>;
+		};
 		up {
-			label = "up";
-			linux,code = <KEY_UP>;
-			press-threshold-microvolt = <1750>;
+		label = "up";
+		linux,code = <KEY_UP>;             		// 按键对应的 Linux 键值
+		press-threshold-microvolt = <13626>; 	// 按下触发的电压阈值
+		};
+		esc {
+		label = "esc";
+		linux,code = <KEY_ESC>;
+		press-threshold-microvolt = <1217582>;
+		};
+		menu {
+		label = "menu";
+		linux,code = <KEY_MENU>;
+		press-threshold-microvolt = <870329>;
 		};
 	};
 
@@ -218,19 +239,25 @@
 	mipi_dsi0_power: mipi-dsi0-power-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "mipi_dsi0_power";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
 		gpio = <&gpio3 RK_PC0 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
 		regulator-always-on;
+		vin-supply = <&vcc4v0_sys>;
 	};
 
 	mipi_dsi1_power: mipi-dsi1-power-regulator {
 		compatible = "regulator-fixed";
 		regulator-name = "mipi_dsi1_power";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
 		gpio = <&gpio3 RK_PC1 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
 		regulator-always-on;
+		vin-supply = <&vcc4v0_sys>;
 	};
 
 	mipi_dp1_power: mipi-edp-power-regulator {
@@ -314,7 +341,7 @@
 };
 
 &dmc {
-	status = "okay";
+	status = "disabled";
 	center-supply = <&vdd_ddr_s0>;
 	mem-supply = <&vdd_log_s0>;
 };
@@ -885,23 +912,24 @@
 };
 
 &sdmmc {//TF卡
-	max-frequency = <200000000>;
+	status = "okay";
 	no-sdio;
 	no-mmc;
 	bus-width = <4>;
 	cap-mmc-highspeed;
 	cap-sd-highspeed;
 	disable-wp;
-	sd-uhs-sdr50;
+	sd-uhs-sdr104;
 	no-1-8-v;
 	vmmc-supply = <&vcc_3v3_sd_s3>;
 	vqmmc-supply = <&vcc_3v3_sd_s3>;
 	// 禁用动态电源控制
 	keep-power-in-suspend;
 	full-pwr-cycle-in-suspend;
-	pinctrl-names = "default";
-	pinctrl-0 = <&sdmmc_bus4 &sdmmc_clk &sdmmc_cmd &sdmmc_det>;
-	status = "okay";
+};
+
+&mipi1_csi2_hw {
+	status = "disabled";
 };
 
 &iep {
@@ -1310,7 +1338,13 @@
 &hdptxphy_hdmi_clk1 {
 	status = "disabled";
 };
+&hdmi0 {
+	status = "disabled";
+};
 
+&hdmi0_in_vp0 {
+	status = "disabled";
+};
 &pinctrl {//在驱动probe()阶段，由pinctrl子系统自动应用，配置GPIO的​​硬件电气特性​​
 	//如果省略pinctrl配置，GPIO可能处于默认状态（如高阻态），导致信号不稳定。
 	usb-typec {

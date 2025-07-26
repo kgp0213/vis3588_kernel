@@ -4507,7 +4507,7 @@
 		clock-names = "pclk_csi2host";
 		resets = <&cru SRST_P_CSI_HOST_1>;
 		reset-names = "srst_csihost_p";
-		status = "okay";
+		status = "disabled";
 	};
 
 	mipi2_csi2_hw: mipi2-csi2-hw@fdd30000 {
@@ -4521,7 +4521,7 @@
 		clock-names = "pclk_csi2host";
 		resets = <&cru SRST_P_CSI_HOST_2>;
 		reset-names = "srst_csihost_p";
-		status = "okay";
+		status = "disabled";
 	};
 
 	mipi3_csi2_hw: mipi3-csi2-hw@fdd40000 {
@@ -4535,7 +4535,7 @@
 		clock-names = "pclk_csi2host";
 		resets = <&cru SRST_P_CSI_HOST_3>;
 		reset-names = "srst_csihost_p";
-		status = "okay";
+		status = "disabled";
 	};
 
 	mipi4_csi2_hw: mipi4-csi2-hw@fdd50000 {
@@ -4549,7 +4549,7 @@
 		clock-names = "pclk_csi2host";
 		resets = <&cru SRST_P_CSI_HOST_4>;
 		reset-names = "srst_csihost_p";
-		status = "okay";
+		status = "disabled";
 	};
 
 	mipi5_csi2_hw: mipi5-csi2-hw@fdd60000 {
@@ -4563,7 +4563,7 @@
 		clock-names = "pclk_csi2host";
 		resets = <&cru SRST_P_CSI_HOST_5>;
 		reset-names = "srst_csihost_p";
-		status = "okay";
+		status = "disabled";
 	};
 
 	vop: vop@fdd90000 {
@@ -6725,7 +6725,7 @@
 		reset-names = "srst_csiphy0", "srst_p_csiphy0";
 		rockchip,grf = <&mipidphy0_grf>;
 		rockchip,sys_grf = <&sys_grf>;
-		status = "okay";
+		status = "disabled";
 	};
 
 	csi2_dphy1_hw: csi2-dphy1-hw@fedc8000 {
@@ -6737,7 +6737,7 @@
 		reset-names = "srst_csiphy1", "srst_p_csiphy1";
 		rockchip,grf = <&mipidphy1_grf>;
 		rockchip,sys_grf = <&sys_grf>;
-		status = "okay";
+		status = "disabled";
 	};
 
 	combphy0_ps: phy@fee00000 {

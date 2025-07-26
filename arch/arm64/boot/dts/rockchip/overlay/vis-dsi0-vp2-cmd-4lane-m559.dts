@@ -7,6 +7,17 @@
 #include <dt-bindings/interrupt-controller/irq.h>
 
 / {
+	fragment@10 {
+		target-path = "/";
+
+		__overlay__ {
+			// 覆盖GPIO配置
+			no_dsc_gpio: no-dsc-gpio {
+				nodsc-pin = <&gpio3 RK_PB4 GPIO_ACTIVE_LOW GPIO_PULL_UP>; // 显式启用上拉
+			};
+		};
+    };
+
 	fragment@0 {
 		target = <&mipi_dcphy0>;
 
@@ -32,7 +43,6 @@
 		};
 	};
 
-
 	fragment@3 {
 		target = <&dsi0>;
 
@@ -41,9 +51,11 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 
+			//rockchip,lane-rate = <1000>; // 1Gbps/lane（根据屏幕调整）
+
 			dsi0_panel: panel@0 {
 				status = "okay";
-				compatible = "simple-panel-dsi";
+				compatible = "simple-panel-dsi", "panel-dsi-vis";
 				reg = <0>;
 				backlight = <&backlight_dsi0>;
 				power-supply = <&mipi_dsi0_power>;
@@ -64,8 +76,10 @@
 				//version-minor = <1>;
 				//以上五行为DSC相关配置
 
-				width-mm = <52>;   // 需根据实际屏幕修改，驱动据此计算像素密度（DPI）
-                height-mm = <120>;
+				//width-mm = <52>;   // 需根据实际屏幕修改，驱动据此计算像素密度（DPI）
+				//height-mm = <120>;
+				size,width = <52>;
+				size,height = <120>;
 
 				dsi,flags = <(MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_EOT_PACKET)>;
 				dsi,format = <MIPI_DSI_FMT_RGB888>;
