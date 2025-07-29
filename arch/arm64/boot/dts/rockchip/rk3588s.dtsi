@@ -4848,6 +4848,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		status = "disabled";
+		rockchip,id = <0>;
 
 		ports {
 			#address-cells = <1>;
@@ -4888,6 +4889,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 		status = "disabled";
+		rockchip,id = <1>;
 
 		ports {
 			#address-cells = <1>;

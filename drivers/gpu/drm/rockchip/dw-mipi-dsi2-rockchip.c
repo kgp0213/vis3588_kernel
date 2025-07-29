@@ -37,6 +37,8 @@
 
 #include "rockchip_drm_drv.h"
 #include "rockchip_drm_vop.h"
+#include <linux/miscdevice.h>
+#include <linux/uaccess.h>
 
 #define UPDATE(v, h, l)			(((v) << (l)) & GENMASK((h), (l)))
 
@@ -278,6 +280,10 @@ struct dw_mipi_dsi2 {
 
 	struct gpio_desc *te_gpio;
 
+	struct miscdevice miscdev;
+	u8 *rx_buf;		// 接收缓冲区 dsi_raw_read 使用
+	size_t rx_len;	// 当前有效数据长度 dsi_raw_read 使用
+	bool data_ready;// 数据就绪标志
 	/* split with other display interface */
 	bool dual_connector_split;
 	bool left_display;
@@ -1998,6 +2004,19 @@ static int dw_mipi_dsi2_read_from_fifo(struct dw_mipi_dsi2 *dsi2,
 	return 0;
 }
 
+/**
+* struct mipi_dsi_packet - 表示协议格式的 MIPI DSI 数据包
+* @size：数据包的大小（以字节为单位）
+* @header：构成标头的四个字节（数据 ID、字数或
+* 数据包数据和 ECC）
+* @payload_length：有效负载中的字节数
+* @payload：指向包含有效负载的缓冲区（如果有）的指针
+struct mipi_dsi_packet {
+size_t size;
+u8 header[4];
+size_t payload_length;
+const u8 *payload;
+};*/
 static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 				    const struct mipi_dsi_msg *msg)
 {
@@ -2017,6 +2036,7 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 		DRM_DEV_ERROR(dsi2->dev, "failed to create packet: %d\n", ret);
 		goto err;
 	}
+	dev_info(dsi2->dev, "Transfer: type=0x%02x, tx_len=%zu, rx_len=%zu\n",msg->type, msg->tx_len, msg->rx_len);
 
 	ret = cri_fifos_wait_avail(dsi2);
 	if (ret)
@@ -2050,9 +2070,31 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 		goto err;
 
 	if (msg->rx_len) {
+		 if (!msg->rx_buf) {// 确保使用正确的缓冲区
+            dev_err(dsi2->dev, "No rx buffer provided!");
+            return -EINVAL;
+        }
+		dev_dbg(dsi2->dev, "prepare to read %zu bytes from FIFO\n", msg->rx_len);
+		//udelay(100);
+		msleep (1);  // 根据屏幕 IC 响应时间调整
 		ret = dw_mipi_dsi2_read_from_fifo(dsi2, msg);
-		if (ret < 0)
+		if (ret < 0){
+			DRM_DEV_DEBUG(dsi2->dev, "Read from fifo failed \n");
 			goto err;
+		}
+
+		print_hex_dump(KERN_DEBUG, "rx_buf received: ", DUMP_PREFIX_OFFSET, 16, 1,msg->rx_buf, ((msg->rx_len<64)?msg->rx_len:64), true);
+		// 打印 rx_buf 的内容（16进制 + ASCII）
+		// print_hex_dump(
+		// 	KERN_INFO,            // 日志级别为 INFO
+		// 	"rx_buf: ",           // 每行前缀字符串
+		// 	DUMP_PREFIX_OFFSET,   // 显示偏移量（如 00000000:）
+		// 	16,                   // 每行16字节
+		// 	1,                    // 不分组
+		// 	msg->rx_buf,          // 数据缓冲区
+		// 	msg->rx_len,          // 数据长度
+		// 	true                  // 显示ASCII字符
+		// );
 	}
 
 	pm_runtime_put(dsi2->dev);
@@ -2060,6 +2102,7 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 	if (dsi2->slave)
 		dw_mipi_dsi2_transfer(dsi2->slave, msg);
 
+	dev_dbg(dsi2->dev, "dw_mipi_dsi2_transfer %zu byte done\n",msg->tx_len);
 	return msg->tx_len;
 
 err:
@@ -2081,6 +2124,191 @@ static const struct mipi_dsi_host_ops dw_mipi_dsi2_host_ops = {
 	.transfer = dw_mipi_dsi2_host_transfer,
 };
 
+// 新增/dev/mipi_dsi0 操作函数
+struct panel_cmd_header {
+	u8 data_type;
+	u8 delay;
+	u8 payload_length;
+} __packed;
+
+struct panel_cmd_desc {
+	struct panel_cmd_header header;
+	u8 *payload;
+};
+
+struct panel_cmd_seq {
+	struct panel_cmd_desc *cmds;
+	unsigned int cmd_cnt;
+};
+static int dsi_raw_open(struct inode *inode, struct file *file)
+{
+	struct dw_mipi_dsi2 *dsi2 = container_of(file->private_data,
+											struct dw_mipi_dsi2, miscdev);
+	file->private_data = dsi2; // echo/cat共享控制器实例
+	return 0;
+}
+
+static int dsi_raw_release(struct inode *inode, struct file *file)
+{
+    return 0;
+}
+
+static ssize_t dsi_raw_read(struct file *file, char __user *buf,
+                          size_t count, loff_t *ppos)
+{
+    // struct dw_mipi_dsi2 *dsi2 = container_of(file->private_data,
+    //                                        struct dw_mipi_dsi2, miscdev);
+	struct dw_mipi_dsi2 *dsi2 = file->private_data;
+	struct device *dev = dsi2->dev;
+
+	dev_dbg(dev, "Read request: count=%zu, rx_len=%zu\n",count, dsi2->rx_len);
+	if (!dsi2->data_ready) {
+		dev_dbg(dsi2->dev, "EOF or No data available for reading");
+		return 0; // 没有数据可读,表示EOF（数据结束）cat执行本函数时，收到0：立即丢弃缓冲区并退出
+	}
+
+	/* 2. 检查可供cat读取的用户缓冲区大小 */
+    if (count < dsi2->rx_len) {
+        dev_warn(dsi2->dev, "User buffer too small (%zu < rx_len:%zu)", 
+                count, dsi2->rx_len);
+        return -ENOSPC;
+    }
+
+    // 3. 复制数据到用户空间
+    if (copy_to_user(buf, dsi2->rx_buf, dsi2->rx_len)){
+		return -EFAULT;
+		dev_info(dev, "Read error\n");
+	}else{
+		dev_dbg(dev, "Returned %zd bytes to user\n", dsi2->rx_len);
+	}
+
+ 	dev_dbg(dsi2->dev, "Read %zu bytes successfully", dsi2->rx_len);
+	dsi2->data_ready=false;
+	return dsi2->rx_len;   //收到N>0：处理前N字节
+}
+/**
+ * struct mipi_dsi_msg - read/write DSI buffer
+ * @channel: virtual channel id
+ * @type: payload data type
+ * @flags: flags controlling this message transmission
+ * @ctrl: ctrl index to transmit on
+ * @wait_ms: duration in ms to wait after message transmission
+ * @tx_len: length of @tx_buf
+ * @tx_buf: data to be written
+ * @rx_len: length of @rx_buf
+ * @rx_buf: data to be read, or NULL
+struct mipi_dsi_msg {
+	u8 channel;
+	u8 type;
+	u16 flags;
+	u32 ctrl;
+	u32 wait_ms;
+
+	size_t tx_len;
+	const void *tx_buf;
+
+	size_t rx_len;
+	void *rx_buf;
+};*/
+static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
+                           size_t count, loff_t *ppos)
+{
+	// struct dw_mipi_dsi2 *dsi2 = container_of(file->private_data,
+	// 										struct dw_mipi_dsi2, miscdev);	
+	struct dw_mipi_dsi2 *dsi2 = file->private_data;
+    struct mipi_dsi_msg msg = {0};
+    u8 *cmd_buf = NULL;
+	struct panel_cmd_header *hdr=NULL;
+    ssize_t  ret;
+	struct device *dev = dsi2->dev;
+
+    /* 1. 基础校验 */
+    if (count < sizeof(struct panel_cmd_header)) {
+        dev_err(dsi2->dev, "Invalid command length: %zu < %zu\n",
+               count, sizeof(struct panel_cmd_header));
+        return -EINVAL;
+    }
+
+    /* 2. 从用户空间拷贝数据 */
+    cmd_buf = kmalloc(count, GFP_KERNEL);
+    if (!cmd_buf)
+        return -ENOMEM;
+
+    if (copy_from_user(cmd_buf, buf, count)) {
+        ret = -EFAULT;
+        goto out_free;
+    }
+
+    /* 3. 解析命令头 */
+    hdr = (struct panel_cmd_header *)cmd_buf;
+    /* 校验payload长度 */
+	if(hdr->data_type==MIPI_DSI_DCS_READ){
+		dev_dbg(dsi2->dev, "DSI will read lenth: %u\n",hdr->payload_length);
+	}else{
+		if (hdr->payload_length != count - sizeof(*hdr)) {
+			dev_err(dsi2->dev, "Payload length mismatch: %u != %zu\n",
+				hdr->payload_length, count - sizeof(*hdr));
+			ret = -EINVAL;
+			goto out_free;
+		}
+	}
+
+	/* 4. 构造DSI消息 */
+	msg.type = hdr->data_type;
+	msg.flags = MIPI_DSI_MSG_USE_LPM;
+
+	// 特殊处理读命令 (0x06)
+	if (msg.type == MIPI_DSI_DCS_READ) {
+		msg.rx_len = hdr->payload_length;	//这里面此时用来传递读取的长度		
+		msg.rx_buf = dsi2->rx_buf;
+		msg.tx_len = 1;//必然为1，因此接下来只发送一个byte reg地址
+		msg.tx_buf = cmd_buf + sizeof(*hdr);
+		// 重置状态
+		dsi2->rx_len = 0;
+		dsi2->data_ready = false;
+	}
+	else if (msg.type == MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE) {//0x37
+		msg.tx_len = hdr->payload_length;
+		msg.tx_buf = cmd_buf + sizeof(*hdr);
+		dev_dbg(dsi2->dev, "set MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE\n");
+	}
+	else{
+		msg.tx_len = hdr->payload_length;
+		msg.tx_buf = cmd_buf + sizeof(*hdr);
+	}
+    dev_dbg(dev, "Processing %s (0x%02x) command, payload len: %u\n",
+			hdr->data_type == MIPI_DSI_DCS_READ ? "READ" : "WRITE",
+			hdr->data_type, hdr->payload_length);
+
+    /* 5. 发送命令 */
+	ret = dw_mipi_dsi2_transfer(dsi2, &msg);
+	if (ret < 0) {
+		dev_err(dsi2->dev, "DSI transfer failed: %zd\n", ret);
+		goto out_free;
+	}
+	/* 6. 写入读命令后更新状态 */
+    if (ret >= 0 && msg.type == MIPI_DSI_DCS_READ) {
+        dsi2->rx_len = msg.rx_len;      // 记录实际读取长度
+        dsi2->data_ready = true;       // 标记数据就绪
+    }
+    /* 7. 处理延时 */ //强制每个命令发送后执行1ms的延时
+    if (hdr->delay+1)
+        msleep(hdr->delay+1);
+
+out_free:
+	kfree(cmd_buf);
+	return ret<0?ret:count;// 返回错误 或者 成功写入的字节数
+
+}
+
+// 3. 文件操作结构体定义
+static const struct file_operations dsi_raw_fops = {
+    .owner = THIS_MODULE,
+    .open = dsi_raw_open,
+    .release = dsi_raw_release,
+    .read = dsi_raw_read,
+    .write = dsi_raw_write,
+};
 static int dw_mipi_dsi2_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -2209,11 +2437,51 @@ static int dw_mipi_dsi2_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	/* 4. 添加misc设备（新增部分）*/
+	dsi2->miscdev.minor = MISC_DYNAMIC_MINOR;
+	dsi2->miscdev.name = kasprintf(GFP_KERNEL, "mipi_dsi%d", dsi2->id);
+	if (!dsi2->miscdev.name) {
+		ret = -ENOMEM;
+		goto err_host_unregister;
+	}
+
+	dsi2->miscdev.fops = &dsi_raw_fops;
+	dsi2->miscdev.parent = dev;
+
+	ret = misc_register(&dsi2->miscdev);
+	if (ret) {
+		dev_err(dev, "Failed to register misc device: %d\n", ret);
+		goto err_free_name;
+	}
+
+	pm_runtime_enable(dev);
+	dev_info(dev, "DSI%d initialized, device node: /dev/%s\n",dsi2->id, dsi2->miscdev.name);
+	// 初始化接收缓冲区
+	dsi2->rx_buf = kmalloc(1024, GFP_KERNEL);
+	if (!dsi2->rx_buf)
+		return -ENOMEM;
+	dsi2->rx_len=0;
+	//-----------以上是添加misc设备---------------------------------------------
 	return component_add(&pdev->dev, &dw_mipi_dsi2_ops);
+
+err_free_name:
+	kfree(dsi2->miscdev.name);
+	err_host_unregister:
+	mipi_dsi_host_unregister(&dsi2->host);
+	return ret;
 }
 
 static int dw_mipi_dsi2_remove(struct platform_device *pdev)
 {
+	struct dw_mipi_dsi2 *dsi2 = platform_get_drvdata(pdev);
+
+	/* 1. 注销misc设备*/
+	misc_deregister(&dsi2->miscdev);
+	kfree(dsi2->miscdev.name);
+
+	/* 3. 原有资源释放部分 */
+	pm_runtime_disable(&pdev->dev);
+	mipi_dsi_host_unregister(&dsi2->host);
 	return 0;
 }
 
