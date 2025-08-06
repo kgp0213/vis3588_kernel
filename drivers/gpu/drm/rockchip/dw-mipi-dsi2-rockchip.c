@@ -2038,6 +2038,21 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 	}
 	dev_info(dsi2->dev, "Transfer: type=0x%02x, tx_len=%zu, rx_len=%zu\n",msg->type, msg->tx_len, msg->rx_len);
 
+	/* 缓冲区打印 */
+	// if (msg->tx_buf) {
+	// 	const u8 *tx_buf = msg->tx_buf;  // 转换为u8指针
+	// 	dev_info(dsi2->dev, "TX buf ptr: %p, len: %zu\n", msg->tx_buf, msg->tx_len);        
+	// 	if (msg->tx_len > 0) {
+	// 		dev_info(dsi2->dev, "First 4 bytes: 0x%02x 0x%02x 0x%02x 0x%02x\n",
+	// 				msg->tx_len > 0 ? tx_buf[0] : 0xFF,
+	// 				msg->tx_len > 1 ? tx_buf[1] : 0xFF,
+	// 				msg->tx_len > 2 ? tx_buf[2] : 0xFF,
+	// 				msg->tx_len > 3 ? tx_buf[3] : 0xFF);
+	// 		print_hex_dump(KERN_ERR, "TX buf: ", DUMP_PREFIX_OFFSET, 16, 1,
+	// 						msg->tx_buf, min_t(size_t, msg->tx_len, 64), true);
+	// 	}
+	// }
+
 	ret = cri_fifos_wait_avail(dsi2);
 	if (ret)
 		goto err;

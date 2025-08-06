@@ -241,10 +241,10 @@
 		regulator-name = "mipi_dsi0_power";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
-		gpio = <&gpio3 RK_PC0 GPIO_ACTIVE_HIGH>;
+		enable-gpios = <&gpio3 RK_PC0 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
-		regulator-boot-on;
-		regulator-always-on;
+		regulator-boot-on;		// 开机默认开启
+		//regulator-always-on;	// 移除 regulator-always-on 以允许手动控制
 		vin-supply = <&vcc4v0_sys>;
 	};
 
@@ -253,10 +253,10 @@
 		regulator-name = "mipi_dsi1_power";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
-		gpio = <&gpio3 RK_PC1 GPIO_ACTIVE_HIGH>;
+		enable-gpios = <&gpio3 RK_PC1 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		regulator-boot-on;
-		regulator-always-on;
+		//regulator-always-on;	// 移除 regulator-always-on 以允许手动控制
 		vin-supply = <&vcc4v0_sys>;
 	};
 
