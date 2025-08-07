@@ -9,7 +9,6 @@ dtbo-$(CONFIG_CPU_RK3588) += \
 	rk3588-i2c8-m1-overlay.dtbo \
 	rk3588-spi4-m1-1cs-overlay.dtbo \
 	rk3588-spi4-m1-2cs-overlay.dtbo \
-	rk3588-5-dsi1-vp3-1080p-overlay.dtbo \
 	rk3588-5-edp-vp2-overlay.dtbo \
 	rk3588-dsi1-vp3-virtual-screen-overlay.dtbo \
 	rk3588-5-dp0-vp1-disabled-overlay.dtbo \
