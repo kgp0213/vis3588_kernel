@@ -1,5 +1,39 @@
 # How do I submit patches to Android Common Kernels
+如何向Android通用内核提交补丁
+最佳实践
 
+​最优方案​：将所有修改提交到上游Linux内核。如果适用，请回传到稳定版本。
+
+这些补丁会自动合并到相应的通用内核中
+如果补丁已存在于上游Linux，请按照下方补丁要求提交回传版本
+重要说明：
+
+不要向上游提交仅包含符号导出的补丁。要添加EXPORT_SYMBOL_GPL()，必须包含使用该符号的内核模块驱动
+提交补丁时，提交信息必须清楚说明该补丁的必要性和对社区的好处
+
+
+
+
+
+次优方案
+
+​次优方案​：在树外开发补丁（从上游Linux角度看）
+
+除非修复Android特有的bug，否则很难被接受
+如需继续，请按照下方补丁要求提交
+
+
+
+通用内核补丁要求
+基本要求
+
+必须符合Linux内核编码标准并通过script/checkpatch.pl检查
+不得破坏arm/arm64/x86/x86_64架构的gki_defconfig或allmodconfig构建
+未从上游分支合并的补丁必须在主题中标记类型：
+UPSTREAM:、BACKPORT:、FROMGIT:、FROMLIST:或ANDROID:
+必须包含Change-Id:标签
+如有Android bug ID，必须包含Bug:标签
+必须包含作者和提交者的Signed-off-by:标签
 1. BEST: Make all of your changes to upstream Linux. If appropriate, backport to the stable releases.
    These patches will be merged automatically in the corresponding common kernels. If the patch is already
    in upstream Linux, post a backport of the patch that conforms to the patch requirements below.
