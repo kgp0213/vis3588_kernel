@@ -44,6 +44,7 @@
 #include <linux/nvmem-consumer.h>
 
 #include "panel-simple.h"
+#include <linux/of_gpio.h>
 
 enum panel_simple_cmd_type {
 	CMD_TYPE_DEFAULT,
@@ -1131,6 +1132,62 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
     loff_t pos = 0;
     int ret;
 
+	int gpio_value;
+	{//按键按下时不使用vis-timing.bin内容
+		int dsc_det_gpio;
+		enum of_gpio_flags flags;
+		dev_info(dev, "start detect GPIO for block get_firmware_desc_data_binfile\n");
+		// 1. 查找GPIO配置节点
+		np = of_find_node_by_name(NULL, "no-dsc-gpio");
+		if (!np) {
+			dev_warn(dev, "No DSC GPIO node found, using fallback\n");
+			dsc_det_gpio = 108; // 默认GPIO108
+		} else {
+			// 2. 从节点获取GPIO配置
+			dsc_det_gpio = of_get_named_gpio_flags(np, "nodsc-pin", 0, &flags);
+			of_node_put(np); // 减少引用计数
+
+			if (dsc_det_gpio < 0) {
+				dev_err(dev, "Invalid GPIO in no-dsc-gpio node, using fallback\n");
+				dsc_det_gpio = 108;
+			}
+		}
+		dev_info(dev, "Using GPIO%d (flags: 0x%x) for get_firmware_desc_data_binfile detection\n",dsc_det_gpio, flags);
+
+		// 3. 请求GPIO
+		ret = gpio_request(dsc_det_gpio, "dsc_det_gpio");
+		if (ret) {
+			dev_err(dev, "Failed to request GPIO %d: %d\n", dsc_det_gpio, ret);
+			// 或处理错误
+		}
+
+		// 4. 配置GPIO方向
+		ret = gpio_direction_input(dsc_det_gpio);
+		if (ret) {
+			dev_err(dev, "Failed to set GPIO%d direction: %d\n", dsc_det_gpio, ret);
+			goto err_free_gpio;
+		}
+
+		// 5. 读取GPIO值
+		gpio_value = gpio_get_value(dsc_det_gpio);
+		dev_info(dev, "GPIO%d state: %s (raw: %d)\n",
+					dsc_det_gpio, gpio_value ? "HIGH" : "LOW", gpio_get_value(dsc_det_gpio));
+
+		if (gpio_value == 0) {
+			dev_info(dev, "GPIO detection: is LOW (button pressed?)\n");
+		} else {
+			dev_info(dev, "GPIO detection: is HIGH (button released)\n");
+		}
+
+		err_free_gpio:
+    	// 7. 释放GPIO
+    	gpio_free(dsc_det_gpio);
+    }
+	if (gpio_value == 0){
+		dev_info(dev, "get_firmware_desc_data_binfile disabled\n");
+		return 1;
+	}
+
 	/* 1. 打开文件 */
 	dev_info(dev, "==============================================");
 	dev_info(dev, "Loading panel config from: %s\n", file_path);
@@ -1226,9 +1283,9 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
     drm_bus_flags_from_videomode(vm, &bus_flags);
 
     /* 填充panel_desc */
-    desc->modes = mode;
-    desc->num_modes = 1;
-    desc->bus_flags = bus_flags;
+    desc->modes = mode;		//面板支持的显示模式（分辨率、刷新率等）
+    desc->num_modes = 1;	//modes数组中的模式（与 num_timings互斥）
+    desc->bus_flags = bus_flags;	//总线信号极性（clk de hs vs同步/数据使能的电平有效性）
     /* 从设备树读取delay参数 */
     of_property_read_u32(np, "prepare-delay-ms", &desc->delay.prepare);
     of_property_read_u32(np, "enable-delay-ms", &desc->delay.enable);

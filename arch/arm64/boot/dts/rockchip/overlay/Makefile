@@ -13,6 +13,7 @@ dtbo-$(CONFIG_CPU_RK3588) += \
 	rk3588-dsi1-vp3-virtual-screen-overlay.dtbo \
 	rk3588-5-dp0-vp1-disabled-overlay.dtbo \
 	vis-dsi0-vp2-cmd-4lane-m559.dtbo \
+	vis-dsi0-vp2-video-4lane-m680.dtbo \
 	vis-dsi0-vp2-cmd-8lane-c39.dtbo
 
 endif
