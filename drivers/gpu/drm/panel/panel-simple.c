@@ -1119,8 +1119,16 @@ static bool of_child_node_is_present(const struct device_node *node,
 	return !!child;
 }
 
+struct panel_desc_dsi {
+	struct panel_desc desc;
+
+	unsigned long flags;
+	enum mipi_dsi_pixel_format format;
+	unsigned int lanes;
+};
+
 static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,struct device *dev,
-					   struct panel_desc *desc)
+					   struct panel_desc *desc, struct panel_desc_dsi *desc_dsi)
 {
     struct device_node *np = dev->of_node; // 从dev获取设备树节点
     struct file *fp;
@@ -1131,6 +1139,10 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
     u32 bus_flags;
     loff_t pos = 0;
     int ret;
+	const u8 *other_info_data;
+	u16 dsi_flags; //  video/cmd mode
+	u8 format_type;
+	u8 lanes;
 
 	int gpio_value;
 	{//按键按下时不使用vis-timing.bin内容
@@ -1325,6 +1337,50 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
         devm_kfree(dev, (void *)exit_data);
         exit_data = NULL;
     }
+
+	/* 读取other_info数据 */
+	other_info_data = (const u8 *)devm_kzalloc(dev, header->other_info_entry.length, GFP_KERNEL);
+	if (!other_info_data) {
+		ret = -ENOMEM;
+		goto err_close;
+	}
+	pos = header->other_info_entry.offset;
+	ret = kernel_read(fp, (void *)other_info_data, header->other_info_entry.length, &pos);
+	if (ret < 0) {
+		dev_err(dev, "Failed to read other info data: %d\n", ret);
+		goto err_close;
+	}
+
+	// 解析other_info_data中的DSI参数
+	dsi_flags = (other_info_data[1] << 8) | other_info_data[0];
+	format_type = other_info_data[4];
+	lanes = other_info_data[5];
+
+	// 转换为DRM/DSI标准定义
+	desc_dsi->flags = dsi_flags;
+
+	// 根据format_type设置MIPI DSI格式
+	switch(format_type) {
+		case 0: // RGB888
+			desc_dsi->format = MIPI_DSI_FMT_RGB888;
+			break;
+		case 1: // RGB666
+			desc_dsi->format = MIPI_DSI_FMT_RGB666;
+			break;
+		case 2: // RGB565
+			desc_dsi->format = MIPI_DSI_FMT_RGB565;
+			break;
+		default:
+			desc_dsi->format = MIPI_DSI_FMT_RGB888;
+			break;
+	}
+
+	desc_dsi->lanes = lanes;
+
+	// 打印调试信息
+	dev_info(dev, "DSI params from firmware: flags=0x%lx, format=%d, lanes=%d\n",
+				desc_dsi->flags, desc_dsi->format, desc_dsi->lanes);
+
     filp_close(fp, NULL);
     return 0;
 
@@ -1584,13 +1640,13 @@ static struct platform_driver panel_simple_platform_driver = {
 	.shutdown = panel_simple_platform_shutdown,
 };
 
-struct panel_desc_dsi {
-	struct panel_desc desc;
+// struct panel_desc_dsi {
+// 	struct panel_desc desc;
 
-	unsigned long flags;
-	enum mipi_dsi_pixel_format format;
-	unsigned int lanes;
-};
+// 	unsigned long flags;
+// 	enum mipi_dsi_pixel_format format;
+// 	unsigned int lanes;
+// };
 
 static const struct drm_display_mode boe_tv080wum_nl0_mode = {
 	.clock = 160000,
@@ -1645,7 +1701,7 @@ static int panel_simple_dsi_of_get_desc_data(struct device *dev,
 	const char *format_str = "Unknown";
 	const char *fw_path = "/lib/firmware/vis-timing.bin";
 
-	err = panel_simple_of_get_firmware_desc_data_binfile(fw_path,dev, &desc->desc);
+	err = panel_simple_of_get_firmware_desc_data_binfile(fw_path, dev, &desc->desc, desc);
 	if (!err) {
 		dev_info(dev,  "Using panel parameters from firmware\n");
 	} else {
@@ -1653,14 +1709,15 @@ static int panel_simple_dsi_of_get_desc_data(struct device *dev,
 		err = panel_simple_of_get_desc_data(dev, &desc->desc);
 		if (err)
 			return err;
+		//-------------------------------------------
+		if (!of_property_read_u32(np, "dsi,flags", &val))
+		desc->flags = val;
+		if (!of_property_read_u32(np, "dsi,format", &val))
+			desc->format = val;
+		if (!of_property_read_u32(np, "dsi,lanes", &val))
+			desc->lanes = val;
 	}
 
-	if (!of_property_read_u32(np, "dsi,flags", &val))
-		desc->flags = val;
-	if (!of_property_read_u32(np, "dsi,format", &val))
-		desc->format = val;
-	if (!of_property_read_u32(np, "dsi,lanes", &val))
-		desc->lanes = val;
 	if (!of_property_read_u32(np, "size,width", &val))
 		desc->desc.size.width = val;
 	if (!of_property_read_u32(np, "size,height", &val))
