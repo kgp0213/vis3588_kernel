@@ -1,0 +1,286 @@
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/display/drm_mipi_dsi.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	fragment@10 {
+		target-path = "/";
+
+		__overlay__ {
+			// 覆盖GPIO配置
+			no_dsc_gpio: no-dsc-gpio {
+				nodsc-pin = <&gpio3 RK_PB4 GPIO_ACTIVE_LOW GPIO_PULL_UP>; // 显式启用上拉
+			};
+		};
+    };
+
+	fragment@0 {
+		target = <&mipi_dcphy0>;
+
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@1 {
+		target = <&route_dsi0>;
+
+		__overlay__ {
+			status = "okay";
+			connect = <&vp2_out_dsi0>;
+		};
+	};
+
+	fragment@2 {
+		target = <&dsi0_in_vp2>;
+
+		__overlay__ {
+			status = "okay";
+		};
+	};
+
+	fragment@3 {
+		target = <&dsi0>;
+
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			//rockchip,lane-rate = <1000>; // 1Gbps/lane（根据屏幕调整）
+
+			dsi0_panel: panel@0 {
+				status = "okay";
+				compatible = "simple-panel-dsi", "panel-dsi-vis";
+				reg = <0>;
+				backlight = <&backlight_dsi0>;
+				power-supply = <&mipi_dsi0_power>;
+				reset-gpios = <&gpio3 RK_PB6 GPIO_ACTIVE_HIGH>;
+
+				enable-delay-ms = <35>;
+				prepare-delay-ms = <6>;
+				reset-delay-ms = <10>;
+				init-delay-ms = <50>;
+				unprepare-delay-ms = <0>;
+				disable-delay-ms = <20>;
+
+				//DSC 压缩配置下面5行
+				//compressed-data;
+				//slice-width = <610>;
+				//slice-height = <16>;
+				//version-major = <1>;
+				//version-minor = <1>;
+				//以上五行为DSC相关配置
+
+				//width-mm = <52>;   // 需根据实际屏幕修改，驱动据此计算像素密度（DPI）
+				//height-mm = <120>;
+				size,width = <52>;
+				size,height = <120>;
+
+				//dsi,flags = <(MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE | MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_EOT_PACKET)>;
+				dsi,flags = <(MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_EOT_PACKET)>;
+				dsi,format = <MIPI_DSI_FMT_RGB888>;
+				dsi,lanes  = <4>;
+
+				panel-init-sequence = [
+					
+					29 00 06 f0 55 aa 52 08 04
+					29 00 02 c2 12
+					29 00 02 6f 01
+					29 00 03 b5 00 14
+					29 00 02 6f 0c
+					29 00 04 b6 00 00 00
+					29 00 02 6f 0f
+					29 00 04 b6 11 20 80
+					29 00 02 6f 18
+					29 00 04 b6 13 00 00
+					29 00 02 6f 1b
+					29 00 04 b6 11 20 80
+					29 00 02 6f 03
+					29 00 02 b5 83
+					29 00 02 6f 00
+					29 00 04 b8 12 00 00
+					29 00 02 6f 03
+					29 00 03 b8 00 ea
+					29 00 02 6f 05
+					29 00 04 b8 12 01 00
+					29 00 02 6f 08
+					29 00 03 b8 03 fd
+					29 00 02 6f 0a
+					29 00 04 b8 12 05 00
+					29 00 02 6f 0d
+					29 00 03 b8 00 62
+					29 00 02 6f 0f
+					29 00 04 b8 25 00 00
+					29 00 02 6f 12
+					29 00 03 b8 00 ea
+					29 00 02 6f 14
+					29 00 04 b8 25 01 00
+					29 00 02 6f 17
+					29 00 03 b8 00 62
+					29 00 02 6f 23
+					29 00 04 b8 27 00 00
+					29 00 02 6f 26
+					29 00 03 b8 03 00
+					29 00 06 f0 55 aa 52 08 00
+					29 00 02 6f 09
+					29 00 03 c0 51 50
+					29 00 05 ff aa 55 a5 80
+					29 00 02 6f 29
+					29 00 03 f8 0d b0
+					29 00 02 6f 0d
+					29 00 03 f8 01 9b
+					29 00 02 6f 0a
+					29 00 06 f6 70 70 70 70 70
+					29 00 02 6f 13
+					29 00 03 f9 32 32
+					29 00 05 ff aa 55 a5 81
+					29 00 02 6f 0a
+					29 00 02 fd 00
+					29 00 02 6f 10
+					29 00 02 fb 04
+					29 00 02 6f 0d
+					29 00 02 fb 80
+					29 00 02 6f 06
+					29 00 02 fe 80
+					29 00 02 6f 0d
+					29 00 02 fe 83
+					29 00 02 6f 10
+					29 00 03 fe 07 ff
+					29 00 02 6f 0f
+					29 00 02 f5 1e
+					29 00 05 ff aa 55 a5 82
+					29 00 02 6f 11
+					29 00 02 f8 0f
+					29 00 02 2f 00
+					29 00 05 2a 00 00 06 87
+					29 00 05 2b 00 00 09 3b
+					29 00 03 81 01 19
+					29 00 02 17 30
+					29 00 02 26 00
+					29 00 02 35 00
+					29 00 02 6f 04
+					29 00 02 35 00
+					29 00 02 6f 14
+					29 00 02 35 00
+					29 00 02 6f 26
+					29 00 08 44 00 32 00 32 32 03 30
+					29 00 02 6f 06
+					29 00 02 6d 08
+					29 00 03 5a 00 09
+					29 00 03 51 1f ff
+					29 00 02 6f 04
+					29 00 03 51 1f ff
+					29 00 02 53 20
+					29 00 03 5a 01 01
+					29 00 03 90 03 43
+					29 00 13 91 89 28 00 0c c2 00 02 a3 01 5c 00 0b 08 bb 05 78 10 f0
+					29 00 01 11
+					29 50 01 29
+
+				];
+
+				panel-exit-sequence = [
+					05 78 01 28
+					05 00 01 10
+				];
+
+				disp0_timings0: display-timings {
+					native-mode = <&dsi0_timing0>;
+					dsi0_timing0: timing0 {
+						clock-frequency = <180600000>;
+						hactive = <560>;
+						vactive = <2364>;
+						hfront-porch = <28>;
+						hback-porch = <38>;
+						hsync-len = <4>;
+						vfront-porch = <28>;
+						vback-porch = <16>;
+						vsync-len = <4>;
+						hsync-active = <0>;
+						vsync-active = <0>;
+						de-active = <0>;
+						pixelclk-active = <0>;
+					};
+				};
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					port@0 {
+						reg = <0>;
+						panel_in_dsi0: endpoint {
+							remote-endpoint = <&dsi0_out_panel>;
+						};
+					};
+				};
+			};
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@1 {
+					reg = <1>;
+					dsi0_out_panel: endpoint {
+						remote-endpoint = <&panel_in_dsi0>;
+					};
+				};
+			};
+		};
+	};
+
+	fragment@4 {
+		target = <&i2c1>;
+
+		__overlay__ {
+			status = "disabled";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&i2c1m2_xfer>;
+
+			gt911_dsi0: gt911@5d {
+				status = "disabled";
+				compatible = "goodix,gt911";
+				reg = <0x5d>;
+				interrupt-parent = <&gpio1>;
+				interrupts = <RK_PB3 IRQ_TYPE_LEVEL_LOW>;
+				reset-gpios = <&gpio1 RK_PB4 GPIO_ACTIVE_LOW>;
+				irq-gpios = <&gpio1 RK_PB3 GPIO_ACTIVE_HIGH>;
+				touchscreen-inverted-x = <1>;
+				touchscreen-inverted-y = <1>;
+			};
+		};
+	};
+
+	fragment@5 {
+		target-path = "/";
+
+		__overlay__ {
+			backlight_dsi0: backlight-dsi0 {
+				status = "okay";
+				compatible = "pwm-backlight";
+				pwms = <&pwm12 0 25000 0>;
+				brightness-levels = <
+				0  20  20  21  21  22  22  23
+				248 249 250 251 252 253 254 255
+				>;
+				default-brightness-level = <0>;
+			};
+		};
+	};
+
+	fragment@6 {
+		target = <&pwm12>;
+
+		__overlay__ {
+			pinctrl-0 = <&pwm12m1_pins>;
+			status = "okay";
+		};
+	};
+};

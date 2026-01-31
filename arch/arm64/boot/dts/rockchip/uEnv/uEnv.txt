@@ -6,10 +6,10 @@ cmdline="earlyprintk console=ttyFIQ0 console=tty1 consoleblank=0 loglevel=7 root
 enable_uboot_overlays=1
 #overlay_start
 
-#dtoverlay  =/dtb/overlay/vis-dsi0-vp2-video-4lane-m680.dtbo
-#dtoverlay  =/dtb/overlay/vis-dsi0-vp2-cmd-4lane-m559.dtbo
+dtoverlay  =/dtb/overlay/vis-dsi0-vp2-cmd-4lane-m559.dtbo
 #dtoverlay =/dtb/overlay/vis-dsi0-vp2-cmd-8lane-c39.dtbo
 
 dtoverlay  =/dtb/overlay/rk3588-i2c3-m3-overlay.dtbo
+dtoverlay  =/dtb/overlay/rk3588-i2c4-m2-overlay.dtbo
 
 #overlay_end
