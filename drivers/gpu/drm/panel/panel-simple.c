@@ -67,6 +67,57 @@ struct panel_cmd_seq {
 	unsigned int cmd_cnt;
 };
 
+static void panel_simple_dump_cmd_seq(struct device *dev, const char *name,
+				       const u8 *data, u32 length)
+{
+	u32 pos = 0;
+	unsigned int idx = 0;
+	const struct panel_cmd_header *header;
+	char line[256];
+	int n, i;
+
+	if (!data || !length) {
+		dev_info(dev, "%s: empty\n", name);
+		return;
+	}
+
+	dev_info(dev, "%s: raw_len=%u\n", name, length);
+	while (pos + sizeof(*header) <= length) {
+		header = (const struct panel_cmd_header *)(data + pos);
+		pos += sizeof(*header);
+
+		if (pos + header->payload_length > length) {
+			dev_warn(dev,
+				 "%s[%u]: truncated payload, payload_len=%u, remain=%u\n",
+				 name, idx, header->payload_length, length - pos);
+			return;
+		}
+
+		dev_info(dev,
+			 "%s[%u]: data_type=0x%02x delay=%u payload_len=%u\n",
+			 name, idx, header->data_type, header->delay,
+			 header->payload_length);
+
+		n = scnprintf(line, sizeof(line), "%s[%u] payload:", name, idx);
+		for (i = 0; i < header->payload_length; i++) {
+			if (n >= sizeof(line) - 4) {
+				dev_info(dev, "%s\n", line);
+				n = scnprintf(line, sizeof(line), "  ");
+			}
+			n += scnprintf(line + n, sizeof(line) - n, " %02x",
+				       data[pos + i]);
+		}
+		dev_info(dev, "%s\n", line);
+
+		pos += header->payload_length;
+		idx++;
+	}
+
+	if (pos != length)
+		dev_warn(dev, "%s: trailing %u bytes after parse\n", name,
+			 length - pos);
+}
+
 /**
  * @modes: Pointer to array of fixed modes appropriate for this panel.  If
  *         only one mode then this can just be the address of this the mode.
@@ -1256,6 +1307,10 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
         dev_err(dev, "Failed to read timing data: %d\n", ret);
         goto err_close;
     }
+    dev_info(dev, "timing from firmware: pixelclock=%lu hactive=%u hfront=%u hsync=%u hback=%u vactive=%u vfront=%u vsync=%u vback=%u flags=0x%x\n",
+	     vm->pixelclock, vm->hactive, vm->hfront_porch, vm->hsync_len,
+	     vm->hback_porch, vm->vactive, vm->vfront_porch, vm->vsync_len,
+	     vm->vback_porch, vm->flags);
 
     /* 读取初始化序列（devm自动释放） */
     init_data = (const u8 *)devm_kzalloc(dev, header->init_seq_entry.length, GFP_KERNEL);
@@ -1293,6 +1348,10 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
 
     drm_display_mode_from_videomode(vm, mode);
     drm_bus_flags_from_videomode(vm, &bus_flags);
+    dev_info(dev, "drm mode from firmware: clock=%d hdisplay=%d hsync_start=%d hsync_end=%d htotal=%d vdisplay=%d vsync_start=%d vsync_end=%d vtotal=%d\n",
+	     mode->clock, mode->hdisplay, mode->hsync_start, mode->hsync_end,
+	     mode->htotal, mode->vdisplay, mode->vsync_start, mode->vsync_end,
+	     mode->vtotal);
 
     /* 填充panel_desc */
     desc->modes = mode;		//面板支持的显示模式（分辨率、刷新率等）
@@ -1317,6 +1376,8 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
         dev_err(dev, "Failed to parse init sequence\n");
         goto err_close;
     }
+    panel_simple_dump_cmd_seq(dev, "init seq", init_data,
+			      header->init_seq_entry.length);
 
     if (init_data) {
         devm_kfree(dev, (void *)init_data);
@@ -1333,6 +1394,8 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
         dev_err(dev, "Failed to parse exit sequence\n");
         goto err_close;
     }
+    panel_simple_dump_cmd_seq(dev, "exit seq", exit_data,
+			      header->eixt_seq_entry.length);
     if (exit_data) {
         devm_kfree(dev, (void *)exit_data);
         exit_data = NULL;
