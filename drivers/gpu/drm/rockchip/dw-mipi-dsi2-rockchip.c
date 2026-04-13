@@ -14,6 +14,7 @@
 #include <linux/of_device.h>
 #include <linux/of_gpio.h>
 #include <linux/pm_runtime.h>
+#include <linux/printk.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/mfd/syscon.h>
@@ -306,6 +307,98 @@ static inline struct dw_mipi_dsi2 *con_to_dsi2(struct drm_connector *con)
 static inline struct dw_mipi_dsi2 *encoder_to_dsi2(struct drm_encoder *encoder)
 {
 	return container_of(encoder, struct dw_mipi_dsi2, encoder);
+}
+
+/*
+ * 把 DSI2 最终拿到的 PPS（Picture Parameter Set）完整打出来。
+ * 这样可以同时看到：
+ * 1) 原始 0x0A 数据包负载；
+ * 2) 驱动解析后的关键字段；
+ * 方便和 vis-timing.bin / panel-init-sequence / 实际运行参数三边对照。
+ */
+static void dw_mipi_dsi2_dump_dsc_pps(struct device *dev,
+				      const char *source,
+				      const struct drm_dsc_picture_parameter_set *pps,
+				      u32 payload_len)
+{
+	u16 bits_per_pixel_x16;
+	u16 initial_xmit_delay;
+	u16 scale_decrement_interval;
+
+	if (!pps) {
+		dev_info(dev, "[dsi2] %s PPS: <null>\n", source);
+		return;
+	}
+
+	dev_info(dev, "[dsi2] ==================== %s PPS BEGIN ====================\n",
+		 source);
+	dev_info(dev, "[dsi2] payload_len           : %u\n", payload_len);
+	dev_info(dev, "[dsi2] raw:\n");
+	print_hex_dump(KERN_INFO, "[dsi2]   ", DUMP_PREFIX_OFFSET,
+		       16, 1, pps, payload_len, false);
+
+	if (payload_len < sizeof(*pps)) {
+		dev_warn(dev,
+			 "[dsi2] %s PPS too short: %u < %zu, skip parsed dump\n",
+			 source, payload_len, sizeof(*pps));
+		dev_info(dev,
+			 "[dsi2] ===================== %s PPS END =====================\n",
+			 source);
+		return;
+	}
+
+	/*
+	 * 下面这些字段最常用于确认 DSC 是否按预期生效：
+	 * - dsc_version：协议版本
+	 * - pic/slice 宽高：整图与分片参数
+	 * - bits_per_pixel：目标压缩位宽（Q4 格式，需 /16 看整数值）
+	 */
+	/*
+	 * 这棵 5.10 内核里的 struct drm_dsc_picture_parameter_set 没有把
+	 * bits_per_component / line_buf_depth / bits_per_pixel / initial_xmit_delay
+	 * 全部拆成独立字段，而是保留了 PPS 原始字节布局，因此这里按位拼回人类可读值。
+	 */
+	bits_per_pixel_x16 = ((pps->pps_4 & 0x3) << 8) | pps->bits_per_pixel_low;
+	initial_xmit_delay = ((pps->initial_xmit_delay_high & 0x3) << 8) |
+			     pps->initial_xmit_delay_low;
+	scale_decrement_interval =
+		((pps->scale_decrement_interval_high & 0x0f) << 8) |
+		 pps->scale_decrement_interval_low;
+	dev_info(dev, "[dsi2] parsed:\n");
+	dev_info(dev, "[dsi2]   dsc_version         : 0x%02x (1.%u)\n",
+		 pps->dsc_version, pps->dsc_version & 0x0f);
+	dev_info(dev, "[dsi2]   bits_per_component  : %u\n",
+		 (pps->pps_3 >> 4) & 0x0f);
+	dev_info(dev, "[dsi2]   line_buf_depth      : %u\n",
+		 pps->pps_3 & 0x0f);
+	dev_info(dev, "[dsi2]   block_pred_enable   : %u\n",
+		 !!(pps->pps_4 & 0x20));
+	dev_info(dev, "[dsi2]   bits_per_pixel_x16  : %u\n",
+		 bits_per_pixel_x16);
+	dev_info(dev, "[dsi2]   bits_per_pixel      : %u\n",
+		 bits_per_pixel_x16 / 16);
+	dev_info(dev, "[dsi2]   pic_width           : %u\n",
+		 be16_to_cpu(pps->pic_width));
+	dev_info(dev, "[dsi2]   pic_height          : %u\n",
+		 be16_to_cpu(pps->pic_height));
+	dev_info(dev, "[dsi2]   slice_width         : %u\n",
+		 be16_to_cpu(pps->slice_width));
+	dev_info(dev, "[dsi2]   slice_height        : %u\n",
+		 be16_to_cpu(pps->slice_height));
+	dev_info(dev, "[dsi2]   chunk_size          : %u\n",
+		 be16_to_cpu(pps->chunk_size));
+	dev_info(dev, "[dsi2]   initial_xmit_delay  : %u\n",
+		 initial_xmit_delay);
+	dev_info(dev, "[dsi2]   initial_dec_delay   : %u\n",
+		 be16_to_cpu(pps->initial_dec_delay));
+	dev_info(dev, "[dsi2]   initial_scale_value : %u\n",
+		 pps->initial_scale_value);
+	dev_info(dev, "[dsi2]   scale_increment_int : %u\n",
+		 pps->scale_increment_interval);
+	dev_info(dev, "[dsi2]   scale_decrement_int : %u\n",
+		 scale_decrement_interval);
+	dev_info(dev, "[dsi2] ===================== %s PPS END =====================\n",
+		 source);
 }
 
 static void grf_field_write(struct dw_mipi_dsi2 *dsi2, enum grf_reg_fields index,
@@ -1365,20 +1458,27 @@ static irqreturn_t dw_mipi_dsi2_te_irq_handler(int irq, void *dev_id)
 
 	return IRQ_HANDLED;
 }
+/*
+ * 固件里的每个数据块都用 offset + length 描述，表示：
+ * - offset：该数据块在 bin 文件中的起始偏移
+ * - length：该数据块的字节长度
+ */
 struct entry {
     u32 offset;
     u32 length;
 };
 /**
- * @magic: LCD config firmware magic number.
- * @vendor: LCD vendor name.
- * @model: LCD model name.
- * @version: LCD config firmware version.
- * @timing_entry: Entry of timing table.
- * @init_seq_entry: Entry of init sequence.
- * @eixt_seq_entry: Entry of exit sequence.
- * @touchscreen_entry: Entry of touchscreen properties.
- * @firmware_size: Firmware size.
+ * @magic: LCD 配置固件魔数，用于判断文件是否是合法的 vis-timing.bin。
+ * @vendor: 面板厂商名。
+ * @model: 面板型号名。
+ * @version: 固件版本字符串。
+ * @timing_entry: timing 表所在位置。
+ * @init_seq_entry: init sequence 所在位置。
+ * @eixt_seq_entry: exit sequence 所在位置。
+ * @touchscreen_entry: 触摸屏相关参数所在位置。
+ * @vesa_dsc_entry: VESA DSC 配置所在位置。
+ * @other_info_entry: 其他扩展信息所在位置。
+ * @firmware_size: 固件总大小。
  */
 struct firmware_header {
 	u32 magic;
@@ -1393,6 +1493,14 @@ struct firmware_header {
 	struct entry other_info_entry;
 	u32 firmware_size;
 };
+/*
+ * 从 vis-timing.bin 中提取两类和 DSC 相关的数据：
+ * 1. vesa_dsc_entry：用于得到 DSC 开关、版本、slice 等基础参数；
+ * 2. init_seq_entry：后面继续从中解析 0x0A PPS 数据包。
+ *
+ * 之所以两者都要拿，是因为“DSC 基本参数”和“真正下发给面板的 PPS”
+ * 分别存放在两个区域里，缺一边都不方便排查。
+ */
 static int dw_mipi_dsi2_get_dsc_params_from_firmware(const char *fw_path,struct device *dev,
 				struct dw_mipi_dsi2 *dsi2,const u8 **init_seq_data,int *init_seq_len)
 {
@@ -1436,7 +1544,13 @@ static int dw_mipi_dsi2_get_dsc_params_from_firmware(const char *fw_path,struct 
     dev_info(dev, "firmware version: %.*s, size: %d\n",8,
              header->version, header->firmware_size);
 
-    /* 4. 检查VESA DSC条目 */
+    /*
+     * vesa_dsc_entry 至少要能覆盖当前使用的基础字段：
+     * - 字节0~4：开关/版本
+     * - 字节8~11：slice_width
+     * - 字节12~15：slice_height
+     * 因此长度小于 16 时，后面的解析结果一定不可靠，直接判错。
+     */
     if (header->vesa_dsc_entry.length < 16) {
         dev_err(dev, "Invalid VESA DSC entry length: %d\n", header->vesa_dsc_entry.length);
         ret = -EINVAL;
@@ -1457,7 +1571,28 @@ static int dw_mipi_dsi2_get_dsc_params_from_firmware(const char *fw_path,struct 
         goto err_close;
     }
 
-    /* 6. 解析DSC参数 */
+    /*
+     * 打印 VESA DSC 条目的原始数据和对齐后的解析结果，
+     * 便于直接和 vis-timing.bin 里的 vesa_dsc_entry 逐字节比对。
+     */
+    dev_info(dev, "[dsi2] ==================== VESA DSC ENTRY BEGIN ====================\n");
+    dev_info(dev, "[dsi2] source: %s\n", fw_path);
+    dev_info(dev, "[dsi2] entry: vesa_dsc_entry\n");
+    dev_info(dev, "[dsi2] offset: 0x%08X\n", header->vesa_dsc_entry.offset);
+    dev_info(dev, "[dsi2] length: %u\n", header->vesa_dsc_entry.length);
+
+    /* raw: 每行 16 字节，固定宽度，便于和二进制文件逐行对应 */
+    dev_info(dev, "[dsi2] raw:\n");
+    print_hex_dump(KERN_INFO, "[dsi2]   ", DUMP_PREFIX_OFFSET,
+		   16, 1, dsc_data, header->vesa_dsc_entry.length, false);
+
+    /*
+     * 这里解析的是厂商固件里额外保存的一份“简化 DSC 参数表”，
+     * 它不是标准 PPS 全量结构，但足够先决定：
+     * - 是否启用 DSC
+     * - 使用哪个版本
+     * - slice 宽高是多少
+     */
     dsi2->c_option = dsc_data[0] != 0;
     dsi2->scrambling_en = dsc_data[1] != 0;
     dsi2->dsc_enable = dsc_data[2] != 0;
@@ -1472,17 +1607,18 @@ static int dw_mipi_dsi2_get_dsc_params_from_firmware(const char *fw_path,struct 
     /* 读取slice_height (字节12-15, 小端格式) */
     dsi2->slice_height = get_unaligned_le32(&dsc_data[12]);
 
-    /* 7. 打印解析结果 */
-    dev_info(dev, "DSC params from firmware:\n");
-    dev_info(dev, "  c_option: %d\n", dsi2->c_option);
-    dev_info(dev, "  scrambling_en: %d\n", dsi2->scrambling_en);
-    dev_info(dev, "  dsc_enable: %d\n", dsi2->dsc_enable);
-    dev_info(dev, "  version: %d.%d\n", dsi2->version_major, dsi2->version_minor);
-    dev_info(dev, "  slice: %dx%d\n", dsi2->slice_width, dsi2->slice_height);
+    /* parsed: 解析后的字段，便于阅读 */
+    dev_info(dev, "[dsi2] parsed:\n");
+    dev_info(dev, "[dsi2]   c_option      : %d\n", dsi2->c_option);
+    dev_info(dev, "[dsi2]   scrambling_en : %d\n", dsi2->scrambling_en);
+    dev_info(dev, "[dsi2]   dsc_enable    : %d\n", dsi2->dsc_enable);
+    dev_info(dev, "[dsi2]   version       : %d.%d\n",
+	     dsi2->version_major, dsi2->version_minor);
+    dev_info(dev, "[dsi2]   slice_width   : %u\n", dsi2->slice_width);
+    dev_info(dev, "[dsi2]   slice_height  : %u\n", dsi2->slice_height);
+    dev_info(dev, "[dsi2] ===================== VESA DSC ENTRY END =====================\n");
 
-	/* 读取panel-init-sequence*/
-	dev_info(dev, "VESA DSC entry: offset=%u, length=%u\n",
-        header->vesa_dsc_entry.offset, header->vesa_dsc_entry.length);
+	/* 读取 panel-init-sequence，后面继续从中提取 0x0A PPS 数据包。 */
     if (init_seq_data && init_seq_len &&
         header->init_seq_entry.length > 60) {
         *init_seq_data = devm_kzalloc(dev, header->init_seq_entry.length, GFP_KERNEL);
@@ -1519,6 +1655,7 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 	const void *data;
 	char *d;
 	uint8_t *dsc_packed_pps;
+	u32 pps_payload_len = 0;
 	int len,ret,gpio_value;
 	int init_seq_len = 0;
 	const u8 *init_seq_data = NULL;
@@ -1533,17 +1670,22 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 	else
 		np = bridge->of_node;
 
-	{//防止dsc参数卡死，导致系统卡死，如果卡死，则通过按住指定按键，在屏幕驱动加载的时候跳过加载DSC参数
+	/*
+	 * 这里保留一个“人工逃生口”：
+	 * 如果某份 DSC 参数会把显示链路卡死，调试时可以通过按键/GPIO
+	 * 在驱动加载阶段临时跳过 DSC，避免每次都必须改代码或重刷固件。
+	 */
+	{
 		int dsc_det_gpio;
 		enum of_gpio_flags flags;
 		dev_info(dev, "start detect GPIO for block dsc params in panel bin\n");
-		// 1. 查找GPIO配置节点
+		/* 1. 查找 GPIO 配置节点 */
 		np = of_find_node_by_name(NULL, "no-dsc-gpio");
 		if (!np) {
 			dev_warn(dsi2->dev, "No DSC GPIO node found, using fallback\n");
-			dsc_det_gpio = 108; // 默认GPIO108
+			dsc_det_gpio = 108; /* 默认 GPIO108 */
 		} else {
-			// 2. 从节点获取GPIO配置
+			/* 2. 从节点获取 GPIO 配置 */
 			dsc_det_gpio = of_get_named_gpio_flags(np, "nodsc-pin", 0, &flags);
 			of_node_put(np); // 减少引用计数
 
@@ -1552,23 +1694,28 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 				dsc_det_gpio = 108;
 			}
 		}
+		/*
+		 * flags 只是辅助观察当前引脚属性；
+		 * 这里真正决定是否跳过 DSC 的，仍然是实际读出来的电平值。
+		 */
 		dev_info(dsi2->dev, "Using GPIO%d (flags: 0x%x) for DSC detection\n",dsc_det_gpio, flags);
 
-		// 3. 请求GPIO
+		/* 3. 请求 GPIO */
 		ret = gpio_request(dsc_det_gpio, "dsc_det_gpio");
-		if (ret) {
+		if (ret)
 			dev_err(dsi2->dev, "Failed to request GPIO %d: %d\n", dsc_det_gpio, ret);
-			// 或处理错误
-		}
 
-		// 4. 配置GPIO方向
+		/* 4. 配置 GPIO 方向 */
 		ret = gpio_direction_input(dsc_det_gpio);
 		if (ret) {
 			dev_err(dsi2->dev, "Failed to set GPIO%d direction: %d\n", dsc_det_gpio, ret);
 			goto err_free_gpio;
 		}
 
-		// 5. 读取GPIO值
+		/*
+		 * 5. 读取 GPIO 值。
+		 * 约定：低电平表示“本次启动跳过 DSC”；高电平表示正常按 DSC 流程继续。
+		 */
 		gpio_value = gpio_get_value(dsc_det_gpio);
 		dev_info(dsi2->dev, "GPIO%d state: %s (raw: %d)\n",
 					dsc_det_gpio, gpio_value ? "HIGH" : "LOW", gpio_get_value(dsc_det_gpio));
@@ -1580,22 +1727,27 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 		}
 
 		err_free_gpio:
-    	// 7. 释放GPIO
+    	/* 7. 无论成功失败都把 GPIO 释放掉，避免影响后续重试。 */
     	gpio_free(dsc_det_gpio);
     }
 	if (gpio_value == 0){
+		/* 用户主动要求跳过 DSC：主从控制器的 dsc_enable 都同步拉低。 */
 		dsi2->dsc_enable = false;
 		if (dsi2->slave)
 			dsi2->slave->dsc_enable = false;
 		dev_info(dsi2->dev, "DSC feature will be disabled\n");
 		return 0;
-	}//防止dsc参数卡死，导致系统卡死
+	}
 
-	// 尝试从固件bin文件读取DSC参数
+	/*
+	 * 优先尝试从固件 bin 读取 DSC 参数。
+	 * 这样做的好处是：如果量产配置已经固化在 vis-timing.bin 里，
+	 * 调试日志就能直接反映“本次启动真正使用的那份配置”。
+	 */
 	ret = dw_mipi_dsi2_get_dsc_params_from_firmware(fw_path,dsi2->dev, dsi2,
 	 							&init_seq_data,&init_seq_len);
     if (ret) {
-        // 如果从固件读取失败，则回退到从设备树读取
+        /* 如果从固件读取失败，则回退到设备树中的静态参数。 */
         dev_info(dsi2->dev, "Failed to get DSC params from firmware, fallback to DT\n");
 
         dsi2->c_option = of_property_read_bool(np, "phy-c-option");
@@ -1615,16 +1767,27 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
         of_property_read_u8(np, "version-major", &dsi2->version_major);
         of_property_read_u8(np, "version-minor", &dsi2->version_minor);
     }
-    else if (dsi2->slave) {//如果成功从固件读取，再判断是否双port
+    else if (dsi2->slave) {
+        /* 如果成功从固件读取，再把基础 DSC 参数同步给从控制器。 */
         dsi2->slave->c_option = dsi2->c_option;
         dsi2->slave->scrambling_en = dsi2->scrambling_en;
         dsi2->slave->dsc_enable = dsi2->dsc_enable;
     }
 
-	if (!dsi2->dsc_enable) //DSC 未开启就直接返回
+	/* DSC 未开启就直接返回，后续也不需要再找 PPS。 */
+	if (!dsi2->dsc_enable)
 		return 0;
 
-	if (ret || !init_seq_data) {//下面开始解析设备树里面的初始化代码
+	/*
+	 * 优先级说明：
+	 * 1. 如果成功从 firmware 里拿到了 init_seq_data，就优先解析 firmware；
+	 * 2. 如果 firmware 读取失败，或者虽然读到了 DSC 基本参数但没有拿到
+	 *    init_seq_data，则回退到设备树里的 panel-init-sequence。
+	 *
+	 * 这样做的目的，是保证“最终送给面板的 0x0A PPS 包”总能尽量找到来源，
+	 * 便于把 firmware / DT / runtime 三个层面的参数串起来看。
+	 */
+	if (ret || !init_seq_data) {	/* 下面开始解析设备树里的初始化代码 */
 	data = of_get_property(np, "panel-init-sequence", &len);
 	if (!data)
 		return -EINVAL;
@@ -1638,24 +1801,49 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 		d += sizeof(*header);
 		len -= sizeof(*header);
 
+		/*
+		 * header 里的 payload_length 是“紧随其后的负载长度”。
+		 * 如果它比当前剩余缓冲区还大，说明序列本身已经损坏，
+		 * 这里直接报错返回，避免继续按错误偏移往后解析。
+		 */
 		if (header->payload_length > len)
 			return -EINVAL;
 
 		if (header->cmd_type == MIPI_DSI_PICTURE_PARAMETER_SET) {
+			/*
+			 * 识别到 MIPI_DSI_PICTURE_PARAMETER_SET（0x0A）后，
+			 * 这里提取的就是最终要下发给面板的 PPS 负载。
+			 */
+			if (header->payload_length < sizeof(*pps)) {
+				dev_err(dev,
+					"[dsi2] dt-init-seq PPS too short: %u < %zu\n",
+					header->payload_length, sizeof(*pps));
+				return -EINVAL;
+			}
+
 			dsc_packed_pps = devm_kmemdup(dsi2->dev, d,
 						      header->payload_length, GFP_KERNEL);
 			if (!dsc_packed_pps)
 				return -ENOMEM;
 
 			pps = (struct drm_dsc_picture_parameter_set *)dsc_packed_pps;
+			pps_payload_len = header->payload_length;
+			dw_mipi_dsi2_dump_dsc_pps(dev, "dt-init-seq",
+						pps,
+						pps_payload_len);
 			break;
-			//这里识别到MIPI_DSI_PICTURE_PARAMETER_SET即0A 代码行后开始提取pps数据
 		}
 
 		d += header->payload_length;
 		len -= header->payload_length;
 	}
-	}else {/* 使用从固件获取的init sequence数据 */
+	} else {	/* 使用从固件获取的 init sequence 数据 */
+		/*
+		 * 这里解析的是 firmware 里的 panel init sequence。
+		 * 如果其中包含 0x0A（MIPI_DSI_PICTURE_PARAMETER_SET），
+		 * 那它就是实际更值得相信的 PPS 来源，因为它和本次加载的
+		 * vis-timing.bin 属于同一份配置数据。
+		 */
 		d = (char *)init_seq_data;
 		len = init_seq_len;
 		dev_info(dev, "found init_seq_data,length is %d\n", len);
@@ -1670,17 +1858,24 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 				return -EINVAL;
 
 			if (header->cmd_type == MIPI_DSI_PICTURE_PARAMETER_SET) {
-				uint8_t *dsc_packed_pps = devm_kmemdup(dev, d,
-										header->payload_length, GFP_KERNEL);
+				if (header->payload_length < sizeof(*pps)) {
+					dev_err(dev,
+						"[dsi2] fw-init-seq PPS too short: %u < %zu\n",
+						header->payload_length, sizeof(*pps));
+					return -EINVAL;
+				}
+
+				dsc_packed_pps = devm_kmemdup(dev, d,
+							      header->payload_length, GFP_KERNEL);
 				dev_dbg(dev, "Found PPS header\n");
 				if (!dsc_packed_pps)
 					return -ENOMEM;
 
 				pps = (struct drm_dsc_picture_parameter_set *)dsc_packed_pps;
-
-				dev_info(dev, "data packet 0A, DSC Version: 1.%d\n", pps->dsc_version & 0xF);
-				dev_info(dev, "data packet 0A, Slice Size: %dx%d\n",be16_to_cpu(pps->slice_width),
-					be16_to_cpu(pps->slice_height));
+				pps_payload_len = header->payload_length;
+				dw_mipi_dsi2_dump_dsc_pps(dev, "fw-init-seq",
+							pps,
+							pps_payload_len);
 				break;
 			}
 			d += header->payload_length;
@@ -1688,7 +1883,13 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 		}
 	}
 
-	if (!pps) {//但是如果用户开启了DSC，但是初始化代码里面又没有放0A 代码行的话就会导致系统卡死
+	/*
+	 * 如果 DSC 已经被宣告开启，但无论 firmware/DT 都找不到 0x0A PPS，
+	 * 后续链路就会进入“控制器按 DSC 方式工作、面板却没有拿到完整 PPS”
+	 * 的不一致状态；这种情况下继续跑下去很容易把显示链路拖死。
+	 * 所以这里直接把 dsc_enable 拉低，并返回错误，避免进入半配置状态。
+	 */
+	if (!pps) {
 		dev_err(dsi2->dev, "not found dsc pps definition\n");
 		dsi2->dsc_enable = false;
 		if (dsi2->slave)
@@ -1701,9 +1902,16 @@ static int dw_mipi_dsi2_get_dsc_params_from_sink(struct dw_mipi_dsi2 *dsi2,
 	if (dsi2->slave) {
 		pic_width = be16_to_cpu(pps->pic_width) / 2;
 
+		/*
+		 * 双 DSI 分屏场景下，面板总宽度需要折半写回 PPS，
+		 * 否则从控制器仍会按整屏宽度发送，导致左右链路参数不一致。
+		 */
 		dsi2->pps->pic_width = cpu_to_be16(pic_width);
-		dev_info(dsi2->dev, "dsc pic_width change from %d to %d\n",
+		dev_info(dsi2->dev, "[dsi2] dsc pic_width change from %d to %d\n",
 			 pic_width * 2, pic_width);
+		dw_mipi_dsi2_dump_dsc_pps(dev, "runtime-adjusted",
+					 dsi2->pps,
+					 pps_payload_len);
 	}
 
 	return 0;

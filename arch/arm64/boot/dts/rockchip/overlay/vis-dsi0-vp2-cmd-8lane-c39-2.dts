@@ -1,0 +1,320 @@
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/display/drm_mipi_dsi.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+    fragment@18 {
+		target-path = "/";
+
+		__overlay__ {
+			// 覆盖GPIO配置
+			no_dsc_gpio: no-dsc-gpio {
+				nodsc-pin = <&gpio3 RK_PB4 GPIO_ACTIVE_LOW GPIO_PULL_UP>; // 显式启用上拉
+			};
+		};
+    };
+    fragment@0 {
+        target = <&mipi_dcphy0>;
+
+		__overlay__ {
+			status = "okay";
+		};
+    };
+
+    fragment@10 {
+        target = <&mipi_dcphy1>;
+
+		__overlay__ {
+			status = "okay";
+		};
+    };
+
+    /* 2. 显示路由配置 - 双VP输出 */
+    fragment@1 {
+        target = <&route_dsi0>;
+
+        __overlay__ {
+            status = "okay";
+            connect = <&vp2_out_dsi0>;  // 左半区绑定VP2
+        };
+    };
+
+    fragment@11 {
+        target = <&route_dsi1>;
+
+        __overlay__ {
+            status = "okay";
+            connect = <&vp2_out_dsi1>;  // 右半区绑定VP2
+        };
+    };
+
+    /* 3. VP输入配置 */
+    fragment@2 {
+        target = <&dsi0_in_vp2>;
+
+		__overlay__ {
+			status = "okay";
+		};
+    };
+
+    fragment@12 {
+        target = <&dsi1_in_vp2>;
+
+		__overlay__ {
+			status = "okay";
+		};
+    };
+
+    /* 4. DSI配置 - 双IC级联 */
+    fragment@3 {
+        target = <&dsi0>;
+
+        __overlay__ {
+            status = "okay";
+            rockchip,dual-channel = <&dsi1>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            /* 级联模式专用标志 */
+            //rockchip,dual-panel-mode;
+            //dsi,cascade-ic = <2>;  // 声明使用两颗驱动IC
+
+            /* 左半区面板配置 */
+            dsi0_panel {
+                status = "okay";
+                compatible = "simple-panel-dsi";
+                //connector-type = "dsi";
+
+                dsi,lanes  = <8>;
+                reg = <0>;  // IC0地址
+                //backlight = <&backlight_dsi0>;
+				power-supply = <&mipi_dsi0_power>;
+                vin-supply = <&vcc3v3_panel>;
+                reset-gpios = <&gpio3 RK_PB6 GPIO_ACTIVE_HIGH>;
+
+				enable-delay-ms = <35>;
+				prepare-delay-ms = <6>;
+				reset-delay-ms = <10>;
+				init-delay-ms = <50>;
+				unprepare-delay-ms = <0>;
+				disable-delay-ms = <20>;
+
+				//DSC 压缩配置下面5行
+				//compressed-data;
+				//slice-width = <610>;
+				//slice-height = <16>;
+				//version-major = <1>;
+				//version-minor = <1>;
+				//以上五行为DSC相关配置
+
+				width-mm = <32>;   // 需根据实际屏幕修改，驱动据此计算像素密度（DPI）
+                height-mm = <120>;
+
+				dsi,flags = <(MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_EOT_PACKET)>;
+				dsi,format = <MIPI_DSI_FMT_RGB888>;
+
+                panel-init-sequence = [
+					//hisi code F_WRITE_REGS_FOR_HI(0x01004044, 0x1)
+					//0A 20 80 11 00 00 A0 30 80 08 C0 04 C4 00 10 02 62 02 62 02 00 02 32 00 20 01 9C 00 08 00 0C 06 67 05 92 18 00 10 E0 07 10 20 00 06 0F 0F 33 0E 1C 2A 38 46 54 62 69 70 77 79 7B 7D 7E 02 02 22 00 2A 40 2A BE 3A FC 3A FA 3A F8 3B 38 3B 78 43 B6 4B B6 4B F6 4B F4 64 34 84 74 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+					29 00 04 ff 01 00 44
+                    39 00 05 40 01 00 00 00
+					29 00 04 ff 00 00 00
+                    05 78 01 11
+                    05 18 01 29
+                    //0A 20 80 11 00 00 A0 30 80 08 C0 04 C4 00 10 02 62 02 62 02 00 02 32 00 20 01 9C 00 08 00 0C 06 67 05 92 18 00 10 E0 07 10 20 00 06 0F 0F 33 0E 1C 2A 38 46 54 62 69 70 77 79 7B 7D 7E 02 02 22 00 2A 40 2A BE 3A FC 3A FA 3A F8 3B 38 3B 78 43 B6 4B B6 4B F6 4B F4 64 34 84 74 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+					29 00 04 ff 01 00 4c
+					39 00 05 00 ff ff ff ff
+                    29 00 04 ff 07 00 3C
+                    39 00 05 A8 00 00 00 00
+                    29 00 04 ff 00 00 00
+
+                ];
+
+				panel-exit-sequence = [
+					05 78 01 28
+					05 00 01 10
+				];
+
+                disp0_timings_left: display-timings {
+                    native-mode = <&dsi0_timing_left>;
+                    dsi0_timing_left: timing-left {
+                        clock-frequency = <125060000>;  // 与右半区保持同步
+                        hactive = <816>;    // 物理分辨率
+                        vactive = <2240>;
+                        hsync-len = <2>;
+                        hback-porch = <68>;
+                        hfront-porch = <88>;
+                        vsync-len = <2>;
+                        vback-porch = <35>;
+                        vfront-porch = <98>;
+                        hsync-active = <0>;
+                        vsync-active = <0>;
+                        de-active = <0>;
+                        pixelclk-active = <0>;
+                    };
+                };
+
+                ports {
+                    #address-cells = <1>;
+                    #size-cells = <0>;
+                    port@0 {
+                        reg = <0>;
+                        panel_in_dsi0: endpoint {
+                            remote-endpoint = <&dsi0_out_panel>;
+                        };
+                    };
+                };
+            };
+
+            ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@1 {
+					reg = <1>;
+					dsi0_out_panel: endpoint {
+						remote-endpoint = <&panel_in_dsi0>;
+					};
+				};
+			};
+        };
+    };
+  	fragment@13 {
+        target = <&dsi1>;
+
+        __overlay__ {
+            status = "okay";
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            /* 右半区面板配置 */
+            dsi0_panel_right: panel-right@1 {
+                compatible = "simple-panel-dsi";
+                reg = <1>;  // IC1地址
+                //backlight = <&backlight_dsi0>;
+                power-supply = <&mipi_dsi0_power>;
+
+                //compressed-data;
+				//slice-width = <610>;
+				//slice-height = <16>;
+				//version-major = <1>;
+				//version-minor = <1>;
+
+                /* 右半区初始化序列（需与左半区同步） */
+                panel-init-sequence = [
+					29 00 04 ff 01 00 45
+                    39 00 05 40 01 00 00 01  // 右半区配置命令
+					29 00 04 ff 00 00 00
+                    05 78 01 11               // 同步睡眠退出
+                    05 18 01 29               // 同步显示开启
+					29 00 04 ff 01 00 4c
+					39 00 05 00 ff ff ff ff
+                    //0A 20 80 11 00 00 A0 30 80 08 C0 04 C4 00 10 02 62 02 62 02 00 02 32 00 20 01 9C 00 08 00 0C 06 67 05 92 18 00 10 E0 07 10 20 00 06 0F 0F 33 0E 1C 2A 38 46 54 62 69 70 77 79 7B 7D 7E 02 02 22 00 2A 40 2A BE 3A FC 3A FA 3A F8 3B 38 3B 78 43 B6 4B B6 4B F6 4B F4 64 34 84 74 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+
+                ];
+
+				panel-exit-sequence = [
+					05 78 01 28
+					05 00 01 10
+				];
+
+                /* 时序参数与左半区完全一致 */
+                disp0_timings_right: display-timings {
+                    native-mode = <&dsi0_timing_right>;
+                    dsi0_timing_right: timing-right {
+                        clock-frequency = <125060000>;
+                        hactive = <816>;
+                        vactive = <2240>;
+                        hsync-len = <2>;
+                        hback-porch = <68>;
+                        hfront-porch = <88>;
+                        vsync-len = <2>;
+                        vback-porch = <35>;
+                        vfront-porch = <98>;
+                        hsync-active = <0>;
+                        vsync-active = <0>;
+                        de-active = <0>;
+                        pixelclk-active = <0>;
+                    };
+                };
+
+                ports {
+                    #address-cells = <1>;
+                    #size-cells = <0>;
+                    port@0 {
+                        reg = <0>;
+                        panel_in_dsi1: endpoint {
+                            remote-endpoint = <&dsi1_out_panel>;
+                        };
+                    };
+                };
+            };
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@1 {
+					reg = <1>;
+					dsi1_out_panel: endpoint {
+						remote-endpoint = <&panel_in_dsi1>;
+					};
+				};
+			};
+        };
+    };
+
+	fragment@4 {
+		target = <&i2c1>;
+
+		__overlay__ {
+			status = "disabled";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&i2c1m2_xfer>;
+
+			gt911_dsi0: gt911@5d {
+				status = "disabled";
+				compatible = "goodix,gt911";
+				reg = <0x5d>;
+				interrupt-parent = <&gpio1>;
+				interrupts = <RK_PB3 IRQ_TYPE_LEVEL_LOW>;
+				reset-gpios = <&gpio1 RK_PB4 GPIO_ACTIVE_LOW>;
+				irq-gpios = <&gpio1 RK_PB3 GPIO_ACTIVE_HIGH>;
+				touchscreen-inverted-x = <1>;
+				touchscreen-inverted-y = <1>;
+			};
+		};
+	};
+
+    /* 7. 背光配置 */
+    fragment@5 {
+        target-path = "/";
+
+        __overlay__ {
+            backlight_dsi0: backlight-dsi0 {
+                status = "okay";
+                compatible = "pwm-backlight";
+                pwms = <&pwm12 0 25000 0>;
+				brightness-levels = <
+				0  20  20  21  21  22  22  23
+				248 249 250 251 252 253 254 255
+				>;
+                default-brightness-level = <0>;
+            };
+        };
+    };
+
+    /* 8. PWM配置 */
+    fragment@6 {
+        target = <&pwm12>;
+
+        __overlay__ {
+            pinctrl-0 = <&pwm12m1_pins>;
+            status = "okay";
+        };
+    };
+};

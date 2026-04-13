@@ -15,6 +15,7 @@ dtbo-$(CONFIG_CPU_RK3588) += \
 	vis-dsi0-vp2-cmd-4lane-m559.dtbo \
 	vis-dsi0-vp2-video-4lane-m680.dtbo \
 	vis-dsi0-vp2-cmd-8lane-c39.dtbo \
+	vis-dsi0-vp2-cmd-8lane-c39-2.dtbo \
 	vis-dsi0-vp2-video-4lane-m756.dtbo \
 	vis-dsi0-vp2-cmd-4lane-dp534.dtbo
 

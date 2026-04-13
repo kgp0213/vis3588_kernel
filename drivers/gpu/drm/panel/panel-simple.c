@@ -284,6 +284,61 @@ static int panel_simple_parse_cmd_seq(struct device *dev,
 	return 0;
 }
 
+/*
+ * 以“每条命令一行”的方式打印 panel 命令序列，便于直接和
+ * vis-timing.bin 里的原始数据逐项比对。
+ * 输出格式固定为：cmd_type delay payload_len payload...
+ */
+static void panel_simple_dump_cmd_seq(struct device *dev,
+				      const char *seq_name,
+				      const struct panel_cmd_seq *seq)
+{
+	unsigned int i, j;
+
+	if (!seq) {
+		dev_info(dev, "[panel-simple] %s: <null>\n", seq_name);
+		return;
+	}
+
+	dev_info(dev, "[panel-simple] ==================== %s BEGIN ====================\n",
+		 seq_name);
+	dev_info(dev, "[panel-simple] cmd_count: %u\n", seq->cmd_cnt);
+
+	for (i = 0; i < seq->cmd_cnt; i++) {
+		const struct panel_cmd_desc *desc = &seq->cmds[i];
+		const struct panel_cmd_header *header = &desc->header;
+		/*
+		 * payload_length 是 u8，单条命令负载最多 255 字节；
+		 * 每个字节打印成 " XX" 共 3 个字符，再加上前缀、索引和
+		 * cmd_type/delay/payload_length 这些固定字段，所以这里需要
+		 * 预留接近 800 字符的缓冲区，而不是简单按 255/259 估算。
+		 */
+		char line[32 + 3 + 1 + 3 + 1 + 3 + 255 * 3 + 1];
+		int pos;
+
+		/*
+		 * 单行格式示例：
+		 * [panel-simple] [000] 39 00 04 FF 98 81 03
+		 * 其中依次表示：data_type、delay、payload_length、payload 字节流。
+		 */
+		pos = scnprintf(line, sizeof(line),
+			"[panel-simple] [%03u] %02X %02X %02X",
+			i,
+			header->data_type,
+			header->delay,
+			header->payload_length);
+
+		for (j = 0; j < header->payload_length; j++)
+			pos += scnprintf(line + pos, sizeof(line) - pos,
+					 " %02X", desc->payload[j]);
+
+		dev_info(dev, "%s\n", line);
+	}
+
+	dev_info(dev, "[panel-simple] ===================== %s END =====================\n",
+		 seq_name);
+}
+
 static int panel_simple_xfer_dsi_cmd_seq(struct panel_simple *panel,
 					 struct panel_cmd_seq *seq)
 {
@@ -655,6 +710,14 @@ static int panel_simple_prepare(struct drm_panel *panel)
 
 	if (p->desc->delay.init)
 		panel_simple_msleep(p->desc->delay.init);
+
+	/*
+	 * 在真正发送初始化命令前，先把 init/exit 两套序列完整打印出来：
+	 * - init_seq：本次 prepare 流程即将发送
+	 * - exit_seq：虽然此处不会执行，但一并打印，方便用户和 bin 文件整体比对
+	 */
+	panel_simple_dump_cmd_seq(panel->dev, "PANEL INIT SEQ", p->desc->init_seq);
+	panel_simple_dump_cmd_seq(panel->dev, "PANEL EXIT SEQ", p->desc->exit_seq);
 
 	if (p->desc->init_seq) {
 		if (p->desc->cmd_type == CMD_TYPE_SPI) {
