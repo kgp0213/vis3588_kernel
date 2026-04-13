@@ -2063,9 +2063,23 @@ static int dw_mipi_dsi2_bind(struct device *dev, struct device *master,
 			goto encoder_cleanup;
 	}
 
-	pm_runtime_enable(dsi2->dev);
-	if (dsi2->slave)
-		pm_runtime_enable(dsi2->slave->dev);
+	/*
+	 * 这里先刻意不在 bind() 阶段再次调用 pm_runtime_enable()。
+	 *
+	 * 原因说明：
+	 * 1. 当前驱动在 dw_mipi_dsi2_probe() 里已经执行过一次
+	 *    pm_runtime_enable(dev)。
+	 * 2. component 框架随后还会进入 dw_mipi_dsi2_bind()；如果这里再对
+	 *    master/slave 各调用一次，就会把 runtime PM enable 计数继续加上去。
+	 * 3. 但后续 remove/unbind 路径里的 disable 次数并不总能与这里形成严格
+	 *    对称，实测会触发 "Unbalanced pm_runtime_enable!"。
+	 * 这里选择保留 probe() 中的 enable，把 bind() 中这组重复 enable
+	 * 注释掉，先消除内核内部 enable/disable 不平衡问题，再继续观察是否影响
+	 * 点屏、DSC、以及后续 adb 恢复链路。
+	 */
+	/* pm_runtime_enable(dsi2->dev); */
+	/* if (dsi2->slave) */
+	/* 	pm_runtime_enable(dsi2->slave->dev); */
 
 	if (dsi2->slave) {
 		DRM_DEV_INFO(dev, "Dual-channel ready (master:%s + slave:%s)\n",
@@ -2677,6 +2691,13 @@ static int dw_mipi_dsi2_probe(struct platform_device *pdev)
 		goto err_free_name;
 	}
 
+	/*
+	 * runtime PM 只在 probe() 阶段使能一次。
+	 *
+	 * bind() 只是 component 组装显示链路的后续阶段，不再重复 enable，避免与
+	 * unbind/remove 路径的 disable 次数失配，触发 "Unbalanced
+	 * pm_runtime_enable!"。
+	 */
 	pm_runtime_enable(dev);
 	dev_info(dev, "DSI%d initialized, device node: /dev/%s\n",dsi2->id, dsi2->miscdev.name);
 	// 初始化接收缓冲区
