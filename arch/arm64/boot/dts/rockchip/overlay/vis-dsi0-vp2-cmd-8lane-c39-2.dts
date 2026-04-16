@@ -116,8 +116,22 @@
 
 				dsi,flags = <(MIPI_DSI_MODE_LPM | MIPI_DSI_MODE_EOT_PACKET)>;
 				dsi,format = <MIPI_DSI_FMT_RGB888>;
-				dcs-backlight-brightness = <255>;
-				dcs-backlight-max-brightness = <255>;
+				/*
+				 * 默认不发送 DCS 0x51 亮度命令。
+				 * 如需显式开启，请在当前 panel 节点中添加下面这个 DT 布尔属性：
+				 *     dcs-backlight-send-brightness;
+				 * 示例：
+				 *     dcs-backlight-send-brightness;
+				 *     dcs-backlight-brightness = <0x1234>;
+				 *     dcs-backlight-max-brightness = <0x2234>;
+				 *
+				 * brightness 使用 16bit，两字节顺序固定为：
+				 *     payload[0] = 亮度高字节
+				 *     payload[1] = 亮度低字节
+				 * 例如 brightness = <0x1234> 时，发出的 payload 为 [12 34]。
+				 */
+				dcs-backlight-brightness = <0x1234>;
+				dcs-backlight-max-brightness = <0x2234>;
 
                 panel-init-sequence = [
 					//hisi code F_WRITE_REGS_FOR_HI(0x01004044, 0x1)
@@ -199,8 +213,23 @@
                 reg = <1>;  // IC1地址
                 //backlight = <&backlight_dsi0>;
                 power-supply = <&mipi_dsi0_power>;
-				dcs-backlight-brightness = <255>;
-				dcs-backlight-max-brightness = <255>;
+				/*
+				 * 默认不发送 DCS 0x51 亮度命令。
+				 * 如需显式开启，请在当前 panel 节点中添加下面这个 DT 布尔属性：
+				 *     dcs-backlight-send-brightness;
+				 *				 
+				 * 示例：
+				 *     dcs-backlight-send-brightness;
+				 *     dcs-backlight-brightness = <0x1234>;
+				 *     dcs-backlight-max-brightness = <0x2234>;
+				 *
+				 * brightness 使用 16bit，两字节顺序固定为：
+				 *     payload[0] = 亮度高字节
+				 *     payload[1] = 亮度低字节
+				 * 例如 brightness = <0x1234> 时，发出的 payload 为 [12 34]。
+				 */
+				dcs-backlight-brightness = <0x1234>;
+				dcs-backlight-max-brightness = <0x2234>;
 
                 //compressed-data;
 				//slice-width = <610>;

@@ -147,6 +147,7 @@ struct panel_simple {
 	bool enabled;
 	bool power_invert;
 	bool no_hpd;
+	bool dcs_bl_send_brightness;
 
 	const struct panel_desc *desc;
 
@@ -906,10 +907,13 @@ static int dcs_bl_update_status(struct backlight_device *bl)
 
 	if (!p->prepared)
 		return 0;
+	if (!p->dcs_bl_send_brightness)
+		return 0;
 
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 
-	ret = mipi_dsi_dcs_set_display_brightness(dsi, bl->props.brightness);
+	ret = mipi_dsi_dcs_set_display_brightness_large(dsi,
+						      bl->props.brightness);
 	if (ret < 0)
 		return ret;
 
@@ -927,16 +931,18 @@ static int dcs_bl_get_brightness(struct backlight_device *bl)
 
 	if (!p->prepared)
 		return 0;
+	if (!p->dcs_bl_send_brightness)
+		return bl->props.brightness;
 
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 
-	ret = mipi_dsi_dcs_get_display_brightness(dsi, &brightness);
+	ret = mipi_dsi_dcs_get_display_brightness_large(dsi, &brightness);
 	if (ret < 0)
 		return ret;
 
 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 
-	return brightness & 0xff;
+	return brightness;
 }
 
 static const struct backlight_ops dcs_bl_ops = {
@@ -1880,6 +1886,9 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 
 	panel = dev_get_drvdata(dev);
 	panel->dsi = dsi;
+	panel->dcs_bl_send_brightness =
+		of_property_read_bool(dev->of_node,
+				      "dcs-backlight-send-brightness");
 
 	if (!panel->base.backlight) {
 		struct backlight_properties props;
@@ -1893,6 +1902,10 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 
 		if (!dcs_bl_max_brightness)
 			dcs_bl_max_brightness = 255;
+		if (dcs_bl_max_brightness > U16_MAX)
+			dcs_bl_max_brightness = U16_MAX;
+		if (dcs_bl_brightness > U16_MAX)
+			dcs_bl_brightness = U16_MAX;
 		if (dcs_bl_brightness > dcs_bl_max_brightness)
 			dcs_bl_brightness = dcs_bl_max_brightness;
 
