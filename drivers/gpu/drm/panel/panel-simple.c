@@ -1883,11 +1883,23 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 
 	if (!panel->base.backlight) {
 		struct backlight_properties props;
+		u32 dcs_bl_brightness = 255;
+		u32 dcs_bl_max_brightness = 255;
+
+		of_property_read_u32(dev->of_node, "dcs-backlight-max-brightness",
+					     &dcs_bl_max_brightness);
+		of_property_read_u32(dev->of_node, "dcs-backlight-brightness",
+					     &dcs_bl_brightness);
+
+		if (!dcs_bl_max_brightness)
+			dcs_bl_max_brightness = 255;
+		if (dcs_bl_brightness > dcs_bl_max_brightness)
+			dcs_bl_brightness = dcs_bl_max_brightness;
 
 		memset(&props, 0, sizeof(props));
 		props.type = BACKLIGHT_RAW;
-		props.brightness = 255;
-		props.max_brightness = 255;
+		props.brightness = dcs_bl_brightness;
+		props.max_brightness = dcs_bl_max_brightness;
 
 		panel->base.backlight =
 			devm_backlight_device_register(dev, dev_name(dev),
