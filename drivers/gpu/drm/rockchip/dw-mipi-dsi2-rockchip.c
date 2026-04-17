@@ -2258,7 +2258,7 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 		DRM_DEV_ERROR(dsi2->dev, "failed to create packet: %d\n", ret);
 		goto err;
 	}
-	dev_info(dsi2->dev, "Transfer: type=0x%02x, tx_len=%zu, rx_len=%zu\n",msg->type, msg->tx_len, msg->rx_len);
+	dev_dbg(dsi2->dev, "Transfer: type=0x%02x, tx_len=%zu, rx_len=%zu\n",msg->type, msg->tx_len, msg->rx_len);
 
 	/* 缓冲区打印 */
 	// if (msg->tx_buf) {
@@ -2366,6 +2366,7 @@ struct panel_cmd_header {
 	u8 data_type;
 	u8 delay;
 	u8 payload_length;
+	u8 flags; /* bit0: 1=LP(default), 0=HS */
 } __packed;
 
 struct panel_cmd_desc {
@@ -2377,6 +2378,24 @@ struct panel_cmd_seq {
 	struct panel_cmd_desc *cmds;
 	unsigned int cmd_cnt;
 };
+
+static void dsi_raw_format_payload(const u8 *buf, size_t len, char *out, size_t out_sz)
+{
+	size_t pos = 0;
+	size_t i;
+
+	if (!out_sz)
+		return;
+
+	out[0] = '\0';
+	for (i = 0; i < len && pos + 4 < out_sz; i++)
+		pos += scnprintf(out + pos, out_sz - pos, "%02x%s",
+				 buf[i], (i == len - 1) ? "" : " ");
+
+	if (i < len && pos + 4 < out_sz)
+		scnprintf(out + pos, out_sz - pos, "...");
+}
+
 static int dsi_raw_open(struct inode *inode, struct file *file)
 {
 	struct dw_mipi_dsi2 *dsi2 = container_of(file->private_data,
@@ -2450,91 +2469,105 @@ struct mipi_dsi_msg {
 static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
                            size_t count, loff_t *ppos)
 {
-	// struct dw_mipi_dsi2 *dsi2 = container_of(file->private_data,
-	// 										struct dw_mipi_dsi2, miscdev);	
 	struct dw_mipi_dsi2 *dsi2 = file->private_data;
-    struct mipi_dsi_msg msg = {0};
-    u8 *cmd_buf = NULL;
-	struct panel_cmd_header *hdr=NULL;
-    ssize_t  ret;
+	struct mipi_dsi_msg msg = {0};
+	u8 *cmd_buf = NULL;
+	struct panel_cmd_header *hdr = NULL;
 	struct device *dev = dsi2->dev;
+	const u8 *payload = NULL;
+	size_t payload_offset = 0;
+	size_t header_len = sizeof(*hdr);
+	bool legacy_hdr = false;
+	char payload_str[3 * 64 + 4];
+	ssize_t ret;
 
-    /* 1. 基础校验 */
-    if (count < sizeof(struct panel_cmd_header)) {
-        dev_err(dsi2->dev, "Invalid command length: %zu < %zu\n",
-               count, sizeof(struct panel_cmd_header));
-        return -EINVAL;
-    }
-
-    /* 2. 从用户空间拷贝数据 */
-    cmd_buf = kmalloc(count, GFP_KERNEL);
-    if (!cmd_buf)
-        return -ENOMEM;
-
-    if (copy_from_user(cmd_buf, buf, count)) {
-        ret = -EFAULT;
-        goto out_free;
-    }
-
-    /* 3. 解析命令头 */
-    hdr = (struct panel_cmd_header *)cmd_buf;
-    /* 校验payload长度 */
-	if(hdr->data_type==MIPI_DSI_DCS_READ){
-		dev_dbg(dsi2->dev, "DSI will read lenth: %u\n",hdr->payload_length);
-	}else{
-		if (hdr->payload_length != count - sizeof(*hdr)) {
-			dev_err(dsi2->dev, "Payload length mismatch: %u != %zu\n",
-				hdr->payload_length, count - sizeof(*hdr));
-			ret = -EINVAL;
-			goto out_free;
-		}
+	/* 1. 基础校验：兼容旧3字节头和新4字节头 */
+	if (count < 4) {
+		dev_err(dev, "Invalid raw command length: %zu\n", count);
+		return -EINVAL;
 	}
 
-	/* 4. 构造DSI消息 */
-	msg.type = hdr->data_type;
-	msg.flags = MIPI_DSI_MSG_USE_LPM;
+	/* 2. 从用户空间拷贝数据 */
+	cmd_buf = kmalloc(count, GFP_KERNEL);
+	if (!cmd_buf)
+		return -ENOMEM;
 
-	// 特殊处理读命令 (0x06)
-	if (msg.type == MIPI_DSI_DCS_READ) {
-		msg.rx_len = hdr->payload_length;	//这里面此时用来传递读取的长度		
-		msg.rx_buf = dsi2->rx_buf;
-		msg.tx_len = 1;//必然为1，因此接下来只发送一个byte reg地址
-		msg.tx_buf = cmd_buf + sizeof(*hdr);
-		// 重置状态
-		dsi2->rx_len = 0;
-		dsi2->data_ready = false;
-	}
-	else if (msg.type == MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE) {//0x37
-		msg.tx_len = hdr->payload_length;
-		msg.tx_buf = cmd_buf + sizeof(*hdr);
-		dev_dbg(dsi2->dev, "set MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE\n");
-	}
-	else{
-		msg.tx_len = hdr->payload_length;
-		msg.tx_buf = cmd_buf + sizeof(*hdr);
-	}
-    dev_dbg(dev, "Processing %s (0x%02x) command, payload len: %u\n",
-			hdr->data_type == MIPI_DSI_DCS_READ ? "READ" : "WRITE",
-			hdr->data_type, hdr->payload_length);
-
-    /* 5. 发送命令 */
-	ret = dw_mipi_dsi2_transfer(dsi2, &msg);
-	if (ret < 0) {
-		dev_err(dsi2->dev, "DSI transfer failed: %zd\n", ret);
+	if (copy_from_user(cmd_buf, buf, count)) {
+		ret = -EFAULT;
 		goto out_free;
 	}
-	/* 6. 写入读命令后更新状态 */
-    if (ret >= 0 && msg.type == MIPI_DSI_DCS_READ) {
-        dsi2->rx_len = msg.rx_len;      // 记录实际读取长度
-        dsi2->data_ready = true;       // 标记数据就绪
-    }
-    /* 7. 处理延时 */ //强制每个命令发送后执行1ms的延时
-    if (hdr->delay+1)
-        msleep(hdr->delay+1);
+
+	/* 3. 解析命令头：优先新4字节头，不匹配则回退旧3字节头 */
+	hdr = (struct panel_cmd_header *)cmd_buf;
+	if (count >= sizeof(*hdr) && hdr->payload_length == count - sizeof(*hdr)) {
+		header_len = sizeof(*hdr);
+		legacy_hdr = false;
+	} else if (cmd_buf[2] == count - 3) {
+		header_len = 3;
+		legacy_hdr = true;
+	} else if (cmd_buf[0] == MIPI_DSI_DCS_READ && count == 4) {
+		header_len = 3;
+		legacy_hdr = true;
+	} else {
+		dev_err(dev, "Payload length mismatch: payload=%u, count=%zu (new expects %zu, legacy expects %zu)\n",
+			hdr->payload_length, count, count - sizeof(*hdr), count - 3);
+		ret = -EINVAL;
+		goto out_free;
+	}
+
+	msg.type = cmd_buf[0];
+	payload_offset = header_len;
+	payload = cmd_buf + payload_offset;
+
+	if (msg.type == MIPI_DSI_DCS_READ) {
+		msg.rx_len = cmd_buf[2];
+		msg.rx_buf = dsi2->rx_buf;
+		msg.tx_len = 1;
+		msg.tx_buf = payload;
+		dsi2->rx_len = 0;
+		dsi2->data_ready = false;
+		msg.flags = MIPI_DSI_MSG_USE_LPM;
+	} else {
+		msg.tx_len = cmd_buf[2];
+		msg.tx_buf = payload;
+		if (msg.type == MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE)
+			msg.flags = MIPI_DSI_MSG_USE_LPM;
+		else if (legacy_hdr)
+			msg.flags = MIPI_DSI_MSG_USE_LPM;
+		else
+			msg.flags = (hdr->flags & 0x1) ? MIPI_DSI_MSG_USE_LPM : 0;
+	}
+
+	dsi_raw_format_payload(payload, msg.tx_len, payload_str, sizeof(payload_str));
+	dev_info(dev,
+		 "DSI-CMD dt=0x%02x delay=%u payload_len=%zu tx_mode=%s payload=[%s]\n",
+		 msg.type,
+		 cmd_buf[1],
+		 msg.tx_len,
+		 (msg.flags & MIPI_DSI_MSG_USE_LPM) ? "LP" : "HS",
+		 payload_str);
+
+	ret = dw_mipi_dsi2_transfer(dsi2, &msg);
+	if (ret < 0) {
+		dev_err(dev,
+			"DSI-CMD failed dt=0x%02x tx_mode=%s payload=[%s] ret=%zd\n",
+			msg.type,
+			(msg.flags & MIPI_DSI_MSG_USE_LPM) ? "LP" : "HS",
+			payload_str, ret);
+		goto out_free;
+	}
+
+	if (msg.type == MIPI_DSI_DCS_READ) {
+		dsi2->rx_len = msg.rx_len;
+		dsi2->data_ready = true;
+	}
+
+	if (cmd_buf[1] + 1)
+		msleep(cmd_buf[1] + 1);
 
 out_free:
 	kfree(cmd_buf);
-	return ret<0?ret:count;// 返回错误 或者 成功写入的字节数
+	return ret < 0 ? ret : count;
 
 }
 
