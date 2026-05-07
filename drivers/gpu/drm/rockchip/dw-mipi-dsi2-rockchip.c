@@ -2497,9 +2497,18 @@ static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
 		goto out_free;
 	}
 
-	/* 3. 解析命令头：优先新4字节头，不匹配则回退旧3字节头 */
+	/*
+	 * 3. 解析命令头：优先新4字节头，不匹配则回退旧3字节头。
+	 *
+	 * flags 字节 (bit0) 约定：
+	 *   bit0=0 → HS (High-Speed)，命令插入 HS 视频流
+	 *   bit0=1 → LP (Low-Power)，命令走 LP escape mode 通道
+	 */
 	hdr = (struct panel_cmd_header *)cmd_buf;
-	if (count >= sizeof(*hdr) && hdr->payload_length == count - sizeof(*hdr)) {
+	if (cmd_buf[0] == MIPI_DSI_DCS_READ && count == 5) {
+		header_len = sizeof(*hdr);
+		legacy_hdr = false;
+	} else if (count >= sizeof(*hdr) && hdr->payload_length == count - sizeof(*hdr)) {
 		header_len = sizeof(*hdr);
 		legacy_hdr = false;
 	} else if (cmd_buf[2] == count - 3) {
@@ -2523,15 +2532,17 @@ static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
 		msg.rx_len = cmd_buf[2];
 		msg.rx_buf = dsi2->rx_buf;
 		msg.tx_len = 1;
-		msg.tx_buf = payload;
+		msg.tx_buf = &cmd_buf[count - 1];
 		dsi2->rx_len = 0;
 		dsi2->data_ready = false;
-		msg.flags = MIPI_DSI_MSG_USE_LPM;
+		msg.flags = legacy_hdr ? MIPI_DSI_MSG_USE_LPM :
+			    (hdr->flags & 0x1) ? MIPI_DSI_MSG_USE_LPM : 0;
 	} else {
 		msg.tx_len = cmd_buf[2];
 		msg.tx_buf = payload;
 		if (msg.type == MIPI_DSI_SET_MAXIMUM_RETURN_PACKET_SIZE)
-			msg.flags = MIPI_DSI_MSG_USE_LPM;
+			msg.flags = legacy_hdr ? MIPI_DSI_MSG_USE_LPM :
+				    (hdr->flags & 0x1) ? MIPI_DSI_MSG_USE_LPM : 0;
 		else if (legacy_hdr)
 			msg.flags = MIPI_DSI_MSG_USE_LPM;
 		else
