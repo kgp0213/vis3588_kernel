@@ -10,7 +10,7 @@
 
 #define MAX_RETRIES 5
 #define RETRY_DELAY_MS 1
-#define MAX_DATA_LEN 262 
+#define MAX_DATA_LEN 262
 
 #define DEBUG 0  // 0关闭/1开启
 
@@ -41,7 +41,7 @@ int hex_to_int(char c) {
 
 int parse_hex_byte(const char *str) {
     if (!str || strlen(str) > 2) return -1;
-    
+
     // 处理单字符情况（如 "1" -> 0x01）
     if (strlen(str) == 1) {
         int val = hex_to_int(str[0]);
@@ -52,7 +52,7 @@ int parse_hex_byte(const char *str) {
     int high = hex_to_int(str[0]);
     int low = hex_to_int(str[1]);
     if (high < 0 || low < 0) return -1;
-    
+
     return (high << 4) | low;
 }
 
@@ -70,13 +70,13 @@ int parse_args(int argc, char *argv[], struct command *cmd) {
     if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
         return 1;
     }
-    
+
     int data_start = 1;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-r") == 0) {
             cmd->is_read = 1;
             data_start++;
-        } 
+        }
         else if (strcmp(argv[i], "-0") == 0) {
             cmd->dev_num = 0;
             data_start++;
@@ -119,7 +119,7 @@ int parse_args(int argc, char *argv[], struct command *cmd) {
         if(DEBUG)
         {
             fprintf(stderr, "cmd->read_len is: %d; cmd->read_reg is:0x%02x\n",cmd->read_len,cmd->read_reg);
-        }        
+        }
         if (cmd->read_reg <= 0 || cmd->read_len <= 0) {
             fprintf(stderr, "Invalid hex value\n");
             return -1;
@@ -259,7 +259,7 @@ int read_register(struct command *cmd) {
         fprintf(stderr, "Malloc failed\n");
         close(fd);
         return -1;
-    }    
+    }
     ssize_t bytes_read = read(fd, buf, cmd->read_len);
     close(fd);
 
