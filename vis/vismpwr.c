@@ -47,7 +47,6 @@ int parse_hex_byte(const char *str) {
         int val = hex_to_int(str[0]);
         return (val < 0) ? -1 : val; // 直接返回单个数字的值
     }
-    
     // 处理双字符情况（如 "1a" -> 0x1A）
     int high = hex_to_int(str[0]);
     int low = hex_to_int(str[1]);
@@ -227,26 +226,41 @@ int read_register(struct command *cmd) {
     char dev_path[32];
     snprintf(dev_path, sizeof(dev_path), "/dev/mipi_dsi%d", cmd->dev_num);
 
-    // 构造set_max_pkt包
-    unsigned char set_max_pkt[5] = {
-        0x37, 0x00, 0x02,
-        cmd->read_len, 0x00 // 由于底层驱动接口限制，这里也跟着做一个限制读取最大长度255.
-    };
-    
-    if (execute_command(dev_path,set_max_pkt, sizeof(set_max_pkt)) < 0) {
-        fprintf(stderr, "Set dt=0x37 packet failed,read len:0x%02x\n",cmd->read_len);
-        return -1;
-    }
-    else if (DEBUG){
-        fprintf(stderr, "Send dt=0x37 packet read len:0x%02x\n",cmd->read_len);
-    }
-    unsigned char read_cmd[4] = {
-        0x06, 0x00, cmd->read_len,
-        cmd->read_reg
-    };
-    if (execute_command(dev_path, read_cmd, sizeof(read_cmd)) < 0) {
-        fprintf(stderr, "Read command failed,read reg:0x%02x\n",cmd->read_reg);
-        return -1;
+    if (cmd->use_lpm) {
+        unsigned char set_max_pkt[5] = {
+            0x37, 0x00, 0x02,
+            cmd->read_len, 0x00
+        };
+
+        if (execute_command(dev_path,set_max_pkt, sizeof(set_max_pkt)) < 0) {
+            fprintf(stderr, "Set dt=0x37 packet failed,read len:0x%02x\n",cmd->read_len);
+            return -1;
+        }
+        unsigned char read_cmd[4] = {
+            0x06, 0x00, cmd->read_len,
+            cmd->read_reg
+        };
+        if (execute_command(dev_path, read_cmd, sizeof(read_cmd)) < 0) {
+            fprintf(stderr, "Read command failed,read reg:0x%02x\n",cmd->read_reg);
+            return -1;
+        }
+    } else {
+        unsigned char set_max_pkt_hs[6] = {
+            0x37, 0x00, 0x02, 0x00,
+            cmd->read_len, 0x00
+        };
+        if (execute_command(dev_path, set_max_pkt_hs, sizeof(set_max_pkt_hs)) < 0) {
+            fprintf(stderr, "Set dt=0x37 packet failed (HS),read len:0x%02x\n",cmd->read_len);
+            return -1;
+        }
+        unsigned char read_cmd_hs[5] = {
+            0x06, 0x00, cmd->read_len, 0x00,
+            cmd->read_reg
+        };
+        if (execute_command(dev_path, read_cmd_hs, sizeof(read_cmd_hs)) < 0) {
+            fprintf(stderr, "Read command failed (HS),read reg:0x%02x\n",cmd->read_reg);
+            return -1;
+        }
     }
 
     int fd = open(dev_path, O_RDONLY);
@@ -289,9 +303,10 @@ void print_usage() {
     printf("    e.g. vismpwr -hs 29 00 03 51 12 34\n");
     printf("    e.g. vismpwr -b -hs 29 00 03 51 12 34\n");
     printf("    default write mode is LP; add -hs to send in HS mode\n");
-    printf("  Read: vismpwr -r [-0|-1] read_len read_reg\n");
+    printf("  Read: vismpwr -r [-0|-1] [-lp|-hs] read_len read_reg\n");
     printf("    read does not support -b/--both\n");
-    printf("    e.g. vismpwr -r 02 51\n");
+    printf("    e.g. vismpwr -r 02 51          (LP read)\n");
+    printf("    e.g. vismpwr -r -hs 02 51      (HS read for video mode)\n");
 }
 
 void print_version() {
@@ -306,7 +321,6 @@ int main(int argc, char *argv[]) {
         print_version();
         return 0;
     }
-    
     ret = parse_args(argc, argv, &cmd);
     if (ret == 1) {
         print_usage();
