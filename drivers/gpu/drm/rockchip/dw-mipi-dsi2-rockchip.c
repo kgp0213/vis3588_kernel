@@ -969,8 +969,6 @@ static void dw_mipi_dsi2_pre_enable(struct dw_mipi_dsi2 *dsi2)
 	dw_mipi_dsi2_host_softrst(dsi2);
 	regmap_write(dsi2->regmap, DSI2_PWR_UP, RESET);
 
-	/* there may be some timeout registers may be configured if desired */
-
 	dw_mipi_dsi2_work_mode(dsi2, dsi2->auto_calc_mode ? 0 : MANUAL_MODE_EN);
 	dw_mipi_dsi2_phy_init(dsi2);
 	dw_mipi_dsi2_tx_option_set(dsi2);
@@ -1541,7 +1539,7 @@ static int dw_mipi_dsi2_get_dsc_params_from_firmware(const char *fw_path,struct 
     }
 
     dev_info(dev, "firmware magic: %x\n", header->magic);
-    dev_info(dev, "firmware version: %.*s, size: %d\n",8,
+    dev_info(dev, "firmware version: %.*s, size: %d\n", 8,
              header->version, header->firmware_size);
 
     /*
