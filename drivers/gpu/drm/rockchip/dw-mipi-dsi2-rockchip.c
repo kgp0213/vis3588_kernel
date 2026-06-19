@@ -2506,6 +2506,11 @@ static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
 	if (cmd_buf[0] == MIPI_DSI_DCS_READ && count == 5) {
 		header_len = sizeof(*hdr);
 		legacy_hdr = false;
+	} else if ((cmd_buf[0] == MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM) ||
+		   (cmd_buf[0] == MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM && count == 5) ||
+		   (cmd_buf[0] == MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM && count == 6)) {
+		header_len = sizeof(*hdr);
+		legacy_hdr = false;
 	} else if (count >= sizeof(*hdr) && hdr->payload_length == count - sizeof(*hdr)) {
 		header_len = sizeof(*hdr);
 		legacy_hdr = false;
@@ -2526,11 +2531,14 @@ static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
 	payload_offset = header_len;
 	payload = cmd_buf + payload_offset;
 
-	if (msg.type == MIPI_DSI_DCS_READ) {
+	if (msg.type == MIPI_DSI_DCS_READ ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM) {
 		msg.rx_len = cmd_buf[2];
 		msg.rx_buf = dsi2->rx_buf;
-		msg.tx_len = 1;
-		msg.tx_buf = &cmd_buf[count - 1];
+		msg.tx_len = count - header_len;
+		msg.tx_buf = &cmd_buf[count - msg.tx_len];
 		dsi2->rx_len = 0;
 		dsi2->data_ready = false;
 		msg.flags = legacy_hdr ? MIPI_DSI_MSG_USE_LPM :
@@ -2566,7 +2574,10 @@ static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
 		goto out_free;
 	}
 
-	if (msg.type == MIPI_DSI_DCS_READ) {
+	if (msg.type == MIPI_DSI_DCS_READ ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM) {
 		dsi2->rx_len = msg.rx_len;
 		dsi2->data_ready = true;
 	}

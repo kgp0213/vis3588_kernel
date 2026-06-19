@@ -119,6 +119,13 @@ int parse_args(int argc, char *argv[], struct command *cmd) {
         {
             fprintf(stderr, "cmd->read_len is: %d; cmd->read_reg is:0x%02x\n",cmd->read_len,cmd->read_reg);
         }
+        /*
+         * read_reg <= 0 同时拦截两种情况:
+         *   a) parse_hex_byte() 解析失败返回 -1
+         *   b) 寄存器地址 0x00
+         * MIPI DCS 中 0x00 为 NOP/保留, 面板寄存器 0x00 无回读意义。
+         * 若将来需要读 0x00, 将 <= 0 改为 < 0 即可。
+         */
         if (cmd->read_reg <= 0 || cmd->read_len <= 0) {
             fprintf(stderr, "Invalid hex value\n");
             return -1;
@@ -310,7 +317,7 @@ void print_usage() {
 }
 
 void print_version() {
-    printf("vismpwr 2026-04-23\n");
+    printf("vismpwr 2026-05-07\n");
 }
 
 int main(int argc, char *argv[]) {
