@@ -89,8 +89,13 @@
 #define RK3588_BURST_NUM		1
 #define RK3588_BURST_SHIFT		8
 #define RK3588_ADDR_SHIFT		16
+#define RK3588_OTPC_PROG_DATA		0x10
 #define RK3588_AUTO_EN			BIT(0)
 #define RK3588_RD_DONE			BIT(1)
+#define RK3588_WR_DONE			BIT(3)	/* OTP_S verified: WR_DONE=bit3 */
+#define RK3588_VERIFY			BIT(2)	/* VERIFY_FAILED */
+#define RK3588_CMD_WRITE		0x2	/* CMD field: 0=READ, 2=WRITE */
+#define RK3588_CMD_READ			0x0
 
 #define RV1126_OTP_NVM_CEB		0x00
 #define RV1126_OTP_NVM_RSTB		0x04
@@ -574,6 +579,11 @@ out:
 
 	return ret;
 }
+
+/* NOTE: rk3588_otp_write() removed — OTP_NS hardware does not support writes.
+ * Use secotp-standalone.ko (OP-TEE TA path) for OTP programming. */
+
+/* NOTE: rk3588_otp_init() removed — OTP_NS is hardware read-only. */
 
 static int rv1126_otp_init(struct rockchip_otp *otp)
 {
