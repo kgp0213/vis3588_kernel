@@ -90,6 +90,13 @@
                 //connector-type = "dsi";
 
                 dsi,lanes  = <8>;
+
+
+                /* OLED 亮度通过 DCS 0x51 控制，设备名固定便于用户态使用 */
+
+                dcs-backlight-send-brightness;
+
+                dcs-backlight-name = "oled";
                 reg = <0>;  // IC0地址
                 //backlight = <&backlight_dsi0>;
 				power-supply = <&mipi_dsi0_power>;

@@ -85,6 +85,10 @@
 				dsi,format = <MIPI_DSI_FMT_RGB888>;
 				dsi,lanes  = <4>;
 
+				/* OLED 亮度通过 DCS 0x51 控制，设备名固定便于用户态使用 */
+				dcs-backlight-send-brightness;
+				dcs-backlight-name = "oled";
+
 				panel-init-sequence = [
 					39 00 02 fe 00
 					39 00 02 2f 0c
