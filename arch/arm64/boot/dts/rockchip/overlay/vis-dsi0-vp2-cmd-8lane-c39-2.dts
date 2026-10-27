@@ -334,7 +334,7 @@
 
         __overlay__ {
             backlight_dsi0: backlight-dsi0 {
-                status = "okay";
+                status = "disabled";
                 compatible = "pwm-backlight";
                 pwms = <&pwm12 0 25000 0>;
 				brightness-levels = <
