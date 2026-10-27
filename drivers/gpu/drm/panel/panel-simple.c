@@ -1889,7 +1889,8 @@ static int panel_simple_dsi_of_get_desc_data(struct device *dev,
  *
  * 返回值：是否解析到 0x51
  */
-static bool panel_simple_dsi_parse_brightness(const struct panel_desc_dsi *desc,
+static bool panel_simple_dsi_parse_brightness(struct device *dev,
+					      const struct panel_desc_dsi *desc,
 					      u16 *init_br, u16 *max_br,
 					      bool *has_max)
 {
@@ -1915,9 +1916,15 @@ static bool panel_simple_dsi_parse_brightness(const struct panel_desc_dsi *desc,
 			val = cmd->payload[1];
 
 		if (cmd->payload[0] == 0x50) {
+			dev_info(dev,
+				 "[panel-simple] init_seq[%02d]: 0x50 (max brightness) = 0x%04x (%u), payload_len=%u\n",
+				 i, val, val, cmd->header.payload_length);
 			*max_br = val;
 			*has_max = true;
 		} else if (cmd->payload[0] == 0x51) {
+			dev_info(dev,
+				 "[panel-simple] init_seq[%02d]: 0x51 (brightness) = 0x%04x (%u), payload_len=%u\n",
+				 i, val, val, cmd->header.payload_length);
 			*init_br = val;
 			has_init = true;
 		}
@@ -1981,7 +1988,7 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 						  &dcs_bl_brightness);
 
 		if (pdesc)
-			has_bin_init = panel_simple_dsi_parse_brightness(pdesc,
+			has_bin_init = panel_simple_dsi_parse_brightness(dev, pdesc,
 									&bin_init_br,
 									&bin_max_br,
 									&has_bin_max);
@@ -2027,9 +2034,13 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 			bl_name = dev_name(dev);
 
 		dev_info(dev,
-			 "[panel-simple] dcs backlight: name=%s brightness=%u max=%u (bin_init=%d bin_max=%d)\n",
-			 bl_name, dcs_bl_brightness, dcs_bl_max_brightness,
-			 has_bin_init, has_bin_max);
+			 "[panel-simple] dcs backlight: name=%s brightness=%u max=%u\n",
+			 bl_name, dcs_bl_brightness, dcs_bl_max_brightness);
+		dev_info(dev,
+			 "[panel-simple] brightness source: 0x51=%s(0x%04x) 0x50=%s(0x%04x) dt_brightness=%s dt_max=%s\n",
+			 has_bin_init ? "bin" : "none", bin_init_br,
+			 has_bin_max ? "bin" : "none", bin_max_br,
+			 has_dt_br ? "yes" : "no", has_dt_max ? "yes" : "no");
 
 		memset(&props, 0, sizeof(props));
 		props.type = BACKLIGHT_RAW;
