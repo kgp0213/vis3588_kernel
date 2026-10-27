@@ -370,6 +370,13 @@ static int panel_simple_xfer_dsi_cmd_seq(struct panel_simple *panel,
 		case MIPI_DSI_DCS_SHORT_WRITE:
 		case MIPI_DSI_DCS_SHORT_WRITE_PARAM:
 		case MIPI_DSI_DCS_LONG_WRITE:
+			/*
+			 * 0x50 <value> 是本平台约定的"最大亮度"元数据，
+			 * 只给驱动解析用，不下发给面板。
+			 */
+			if (cmd->header.payload_length >= 2 &&
+			    cmd->payload[0] == 0x50)
+				continue;
 			err = mipi_dsi_dcs_write_buffer(dsi, cmd->payload,
 							cmd->header.payload_length);
 			break;
@@ -1875,6 +1882,50 @@ static int panel_simple_dsi_of_get_desc_data(struct device *dev,
 	return 0;
 }
 
+/*
+ * 从初始化序列里解析亮度信息（面板相关参数全部跟随 bin，驱动不硬编码）：
+ *   0x50 <val>        : 面板最大亮度（本平台约定，仅驱动内部使用）
+ *   0x51 <hi><lo>     : 当前亮度，取最后一条
+ *
+ * 返回值：是否解析到 0x51
+ */
+static bool panel_simple_dsi_parse_brightness(const struct panel_desc_dsi *desc,
+					      u16 *init_br, u16 *max_br,
+					      bool *has_max)
+{
+	struct panel_cmd_seq *seq = desc->desc.init_seq;
+	bool has_init = false;
+	int i;
+
+	*has_max = false;
+
+	if (!seq)
+		return false;
+
+	for (i = 0; i < seq->cmd_cnt; i++) {
+		struct panel_cmd_desc *cmd = &seq->cmds[i];
+		u16 val;
+
+		if (cmd->header.payload_length < 2)
+			continue;
+
+		if (cmd->header.payload_length >= 3)
+			val = (cmd->payload[1] << 8) | cmd->payload[2];
+		else
+			val = cmd->payload[1];
+
+		if (cmd->payload[0] == 0x50) {
+			*max_br = val;
+			*has_max = true;
+		} else if (cmd->payload[0] == 0x51) {
+			*init_br = val;
+			has_init = true;
+		}
+	}
+
+	return has_init;
+}
+
 static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 {
 	struct panel_simple *panel;
@@ -1914,16 +1965,55 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 
 	if (!panel->base.backlight) {
 		struct backlight_properties props;
-		u32 dcs_bl_brightness = 255;
-		u32 dcs_bl_max_brightness = 255;
+		struct panel_desc_dsi *pdesc = id->data ? NULL : d;
+		u32 dcs_bl_brightness = 0;
+		u32 dcs_bl_max_brightness = 0;
+		const char *bl_name = NULL;
+		bool has_bin_init = false, has_bin_max = false;
+		u16 bin_init_br = 0, bin_max_br = 0;
+		bool has_dt_br, has_dt_max;
 
-		of_property_read_u32(dev->of_node, "dcs-backlight-max-brightness",
-					     &dcs_bl_max_brightness);
-		of_property_read_u32(dev->of_node, "dcs-backlight-brightness",
-					     &dcs_bl_brightness);
+		has_dt_max = !of_property_read_u32(dev->of_node,
+						   "dcs-backlight-max-brightness",
+						   &dcs_bl_max_brightness);
+		has_dt_br = !of_property_read_u32(dev->of_node,
+						  "dcs-backlight-brightness",
+						  &dcs_bl_brightness);
+
+		if (pdesc)
+			has_bin_init = panel_simple_dsi_parse_brightness(pdesc,
+									&bin_init_br,
+									&bin_max_br,
+									&has_bin_max);
+
+		/*
+		 * 最大亮度优先级：
+		 *   1) bin 里的 0x50
+		 *   2) bin 里的 0x51（没有 0x50 时）
+		 *   3) 设备树 dcs-backlight-max-brightness
+		 *   4) U16_MAX
+		 */
+		if (has_bin_max) {
+			dcs_bl_max_brightness = bin_max_br;
+		} else if (has_bin_init) {
+			dcs_bl_max_brightness = bin_init_br;
+		} else if (!has_dt_max) {
+			dcs_bl_max_brightness = U16_MAX;
+		}
+
+		/*
+		 * 初始亮度优先级：
+		 *   1) bin 里最后一条 0x51（与面板初始化后的实际值一致，避免跳变）
+		 *   2) 设备树 dcs-backlight-brightness
+		 */
+		if (has_bin_init) {
+			dcs_bl_brightness = bin_init_br;
+		} else if (!has_dt_br) {
+			dcs_bl_brightness = 255;
+		}
 
 		if (!dcs_bl_max_brightness)
-			dcs_bl_max_brightness = 255;
+			dcs_bl_max_brightness = U16_MAX;
 		if (dcs_bl_max_brightness > U16_MAX)
 			dcs_bl_max_brightness = U16_MAX;
 		if (dcs_bl_brightness > U16_MAX)
@@ -1931,13 +2021,23 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 		if (dcs_bl_brightness > dcs_bl_max_brightness)
 			dcs_bl_brightness = dcs_bl_max_brightness;
 
+		/* 设备名固定，便于用户态使用；DT 未配置时退回设备名 */
+		if (of_property_read_string(dev->of_node, "dcs-backlight-name",
+					    &bl_name) || !bl_name || !bl_name[0])
+			bl_name = dev_name(dev);
+
+		dev_info(dev,
+			 "[panel-simple] dcs backlight: name=%s brightness=%u max=%u (bin_init=%d bin_max=%d)\n",
+			 bl_name, dcs_bl_brightness, dcs_bl_max_brightness,
+			 has_bin_init, has_bin_max);
+
 		memset(&props, 0, sizeof(props));
 		props.type = BACKLIGHT_RAW;
 		props.brightness = dcs_bl_brightness;
 		props.max_brightness = dcs_bl_max_brightness;
 
 		panel->base.backlight =
-			devm_backlight_device_register(dev, dev_name(dev),
+			devm_backlight_device_register(dev, bl_name,
 						       dev, panel, &dcs_bl_ops,
 						       &props);
 		if (IS_ERR(panel->base.backlight)) {
