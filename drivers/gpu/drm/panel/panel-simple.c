@@ -674,6 +674,11 @@ static int panel_simple_prepare(struct drm_panel *panel)
 		return err;
 	}
 
+	dev_info(panel->dev,
+		 "[panel-simple] power seq: prepare=%ums reset=%ums init=%ums\n",
+		 p->desc->delay.prepare, p->desc->delay.reset,
+		 p->desc->delay.init);
+
 	gpiod_direction_output(p->enable_gpio, 1);
 
 	delay = p->desc->delay.prepare;
@@ -743,6 +748,9 @@ static int panel_simple_enable(struct drm_panel *panel)
 
 	if (p->enabled)
 		return 0;
+
+	dev_info(panel->dev, "[panel-simple] enable seq: enable=%ums\n",
+		 p->desc->delay.enable);
 
 	if (p->desc->delay.enable)
 		panel_simple_msleep(p->desc->delay.enable);
@@ -1199,7 +1207,8 @@ struct panel_desc_dsi {
 static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,struct device *dev,
 					   struct panel_desc *desc, struct panel_desc_dsi *desc_dsi)
 {
-    struct device_node *np = dev->of_node; // 从dev获取设备树节点
+    struct device_node *np = dev->of_node; // 从dev获取设备树节点（面板节点，后面读 delay 要用）
+    struct device_node *dsc_np;            // 专用于 no-dsc-gpio 检测，避免覆盖 np
     struct file *fp;
     struct firmware_header *header;
     struct drm_display_mode *mode;
@@ -1219,14 +1228,14 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
 		enum of_gpio_flags flags;
 		dev_info(dev, "start detect GPIO for block get_firmware_desc_data_binfile\n");
 		// 1. 查找GPIO配置节点
-		np = of_find_node_by_name(NULL, "no-dsc-gpio");
-		if (!np) {
+		dsc_np = of_find_node_by_name(NULL, "no-dsc-gpio");
+		if (!dsc_np) {
 			dev_warn(dev, "No DSC GPIO node found, using fallback\n");
 			dsc_det_gpio = 108; // 默认GPIO108
 		} else {
 			// 2. 从节点获取GPIO配置
-			dsc_det_gpio = of_get_named_gpio_flags(np, "nodsc-pin", 0, &flags);
-			of_node_put(np); // 减少引用计数
+			dsc_det_gpio = of_get_named_gpio_flags(dsc_np, "nodsc-pin", 0, &flags);
+			of_node_put(dsc_np); // 减少引用计数
 
 			if (dsc_det_gpio < 0) {
 				dev_err(dev, "Invalid GPIO in no-dsc-gpio node, using fallback\n");
