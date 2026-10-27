@@ -7,6 +7,7 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_uapi.h>
 #include <drm/drm_crtc.h>
+#include <drm/drm_modes.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_debugfs.h>
 #include <drm/drm_flip_work.h>
@@ -568,6 +569,11 @@ struct vop2_video_port {
 
 	struct completion dsp_hold_completion;
 	struct completion line_flag_completion;
+
+	/* EDPI/CMD 模式：TE 超时看门狗 */
+	struct delayed_work te_timeout_work;
+	bool edpi_wait_te;
+	unsigned int te_retry;
 
 	/* protected by dev->event_lock */
 	struct drm_pending_vblank_event *event;
@@ -4617,6 +4623,9 @@ static void vop2_crtc_atomic_disable(struct drm_crtc *crtc,
 
 	WARN_ON(vp->event);
 
+	cancel_delayed_work_sync(&vp->te_timeout_work);
+	vp->edpi_wait_te = false;
+
 	if (crtc->state->self_refresh_active) {
 		vop2_crtc_atomic_enter_psr(crtc, old_state);
 		goto out;
@@ -8168,6 +8177,68 @@ static void vop3_setup_pipe_dly(struct vop2_video_port *vp, const struct vop2_zp
 	}
 }
 
+/*
+ * EDPI（MIPI CMD）模式下，VOP 每帧都要等面板的 TE 才会开始发送。
+ * 如果面板没有接（或 TE 信号异常），edpi_wms_hold_en=1 会让 VOP 一帧都发不出去，
+ * 进而导致 DRM 提交在等 vblank 时长时间阻塞、系统启动被拖慢数分钟。
+ *
+ * 这里在使能后 2 秒检查一次行计数器：若仍是 0（面板上电稳定出 TE 通常需要约 1 秒），说明一帧都没扫出来，
+ * 判定为"无 TE"，清掉 hold/te 让 VOP 自由运行，保证系统能正常启动。
+ */
+static void vop2_te_timeout_work(struct work_struct *work)
+{
+	struct vop2_video_port *vp = container_of(to_delayed_work(work),
+						  struct vop2_video_port,
+						  te_timeout_work);
+	struct vop2 *vop2 = vp->vop2;
+	struct drm_crtc *crtc = &vp->rockchip_crtc.crtc;
+	uint32_t vcnt;
+
+	mutex_lock(&vop2->vop2_lock);
+	if (!vp->edpi_wait_te || !vop2->is_enabled) {
+		mutex_unlock(&vop2->vop2_lock);
+		return;
+	}
+
+	vcnt = vop2_read_vcnt(vp);
+	if (vcnt) {
+		DRM_DEV_INFO(vop2->dev,
+			     "vp%d: TE ok after %ums, vcnt=%u\n",
+			     vp->id, (vp->te_retry + 1) * 500, vcnt);
+		vp->edpi_wait_te = false;
+		mutex_unlock(&vop2->vop2_lock);
+		return;
+	}
+
+	/* 面板上电到稳定出 TE 需要时间，最多重试 12 次（6 秒） */
+	vp->te_retry++;
+	if (vp->te_retry < 12) {
+		DRM_DEV_INFO(vop2->dev,
+			     "vp%d: vcnt=0 at %ums, retry TE\n",
+			     vp->id, vp->te_retry * 500);
+		schedule_delayed_work(&vp->te_timeout_work,
+				      msecs_to_jiffies(500));
+		mutex_unlock(&vop2->vop2_lock);
+		return;
+	}
+
+	/* 6 秒都没等到 TE：判定面板缺失或 TE 异常，降级自由运行 */
+	if (crtc->state) {
+		struct drm_display_mode *m = &crtc->state->adjusted_mode;
+
+		DRM_DEV_ERROR(vop2->dev,
+			      "vp%d: no TE from panel in 6000ms, vcnt=%u, dclk=%lu, "
+			      "mode=%dx%d@%d, fallback to free-run (panel absent or TE broken)\n",
+			      vp->id, vcnt, clk_get_rate(vp->dclk),
+			      m->hdisplay, m->vdisplay, drm_mode_vrefresh(m));
+	}
+	VOP_MODULE_SET(vop2, vp, edpi_wms_hold_en, 0);
+	VOP_MODULE_SET(vop2, vp, edpi_te_en, 0);
+	vop2_cfg_done(crtc);
+	vp->edpi_wait_te = false;
+	mutex_unlock(&vop2->vop2_lock);
+}
+
 static void vop2_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state *old_state)
 {
 	struct vop2_video_port *vp = to_vop2_video_port(crtc);
@@ -8336,6 +8407,11 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state
 		if (vcstate->hold_mode) {
 			VOP_MODULE_SET(vop2, vp, edpi_te_en, !vcstate->soft_te);
 			VOP_MODULE_SET(vop2, vp, edpi_wms_hold_en, 1);
+
+			vp->edpi_wait_te = true;
+			vp->te_retry = 0;
+			schedule_delayed_work(&vp->te_timeout_work,
+					      msecs_to_jiffies(500));
 		}
 	}
 
@@ -8358,6 +8434,11 @@ static void vop2_crtc_atomic_enable(struct drm_crtc *crtc, struct drm_crtc_state
 		if (vcstate->hold_mode) {
 			VOP_MODULE_SET(vop2, vp, edpi_te_en, !vcstate->soft_te);
 			VOP_MODULE_SET(vop2, vp, edpi_wms_hold_en, 1);
+
+			vp->edpi_wait_te = true;
+			vp->te_retry = 0;
+			schedule_delayed_work(&vp->te_timeout_work,
+					      msecs_to_jiffies(500));
 		}
 	}
 
@@ -12050,6 +12131,7 @@ static int vop2_create_crtc(struct vop2 *vop2)
 
 		init_completion(&vp->dsp_hold_completion);
 		init_completion(&vp->line_flag_completion);
+		INIT_DELAYED_WORK(&vp->te_timeout_work, vop2_te_timeout_work);
 		rockchip_register_crtc_funcs(crtc, &private_crtc_funcs);
 		soc_id = vop2_soc_id_fixup(soc_id);
 		drm_object_attach_property(&crtc->base, private->soc_id_prop, soc_id);
