@@ -679,6 +679,9 @@ static int panel_simple_prepare(struct drm_panel *panel)
 		 p->desc->delay.prepare, p->desc->delay.reset,
 		 p->desc->delay.init);
 
+	dev_info(panel->dev, "[panel-simple] screen power ON, wait %ums for stable\n",
+		 p->desc->delay.prepare);
+
 	gpiod_direction_output(p->enable_gpio, 1);
 
 	delay = p->desc->delay.prepare;
@@ -708,14 +711,20 @@ static int panel_simple_prepare(struct drm_panel *panel)
 	}
 
 	gpiod_direction_output(p->reset_gpio, 1);
+	dev_info(panel->dev, "[panel-simple] reset -> HIGH (level=%d, assert), hold %ums\n",
+		 gpiod_get_value_cansleep(p->reset_gpio), p->desc->delay.reset);
 
 	if (p->desc->delay.reset)
 		panel_simple_msleep(p->desc->delay.reset);
 
 	gpiod_direction_output(p->reset_gpio, 0);
+	dev_info(panel->dev, "[panel-simple] reset -> LOW (level=%d, release), wait %ums\n",
+		 gpiod_get_value_cansleep(p->reset_gpio), p->desc->delay.init);
 
 	if (p->desc->delay.init)
 		panel_simple_msleep(p->desc->delay.init);
+
+	dev_info(panel->dev, "[panel-simple] start sending init sequence\n");
 
 	/*
 	 * 在真正发送初始化命令前，先把 init/exit 两套序列完整打印出来：
