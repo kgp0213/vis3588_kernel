@@ -2388,10 +2388,16 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 	if (ret)
 		goto err;
 
-	/* 再等 core/IPI 真正把包发出去 */
-	ret = dw_mipi_dsi2_wait_core_idle(dsi2);
-	if (ret)
-		goto err;
+	/*
+	 * 再等 core/IPI 真正把包发出去。
+	 * 注意：视频模式下 IPI 持续在推像素，IPI_BUSY 本就是常置的，
+	 * 这里不能等（否则每条命令都会等到超时）。
+	 */
+	if (!(dsi2->mode_flags & MIPI_DSI_MODE_VIDEO)) {
+		ret = dw_mipi_dsi2_wait_core_idle(dsi2);
+		if (ret)
+			goto err;
+	}
 
 	if (msg->rx_len) {
 		 if (!msg->rx_buf) {// 确保使用正确的缓冲区
@@ -2669,18 +2675,7 @@ static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
 		goto out_free;
 	}
 
-	/* 诊断：打印发送后的控制器状态，用于定位 HS 丢包 */
-	if (!(msg.flags & MIPI_DSI_MSG_USE_LPM)) {
-		u32 core_st = 0, int_cri = 0, int_main = 0, int_ack = 0;
 
-		regmap_read(dsi2->regmap, DSI2_CORE_STATUS, &core_st);
-		regmap_read(dsi2->regmap, DSI2_INT_ST_CRI, &int_cri);
-		regmap_read(dsi2->regmap, INT_ST_MAIN, &int_main);
-		regmap_read(dsi2->regmap, DSI2_INT_ST_ACK, &int_ack);
-		dev_info(dev,
-			 "HS-ST payload=[%s] core=0x%08x cri=0x%08x main=0x%08x ack=0x%08x\n",
-			 payload_str, core_st, int_cri, int_main, int_ack);
-	}
 
 	if (msg.type == MIPI_DSI_DCS_READ ||
 	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM ||
