@@ -124,8 +124,13 @@ int parse_args(int argc, char *argv[], struct command *cmd) {
         }
     }
 
-    if (cmd->batch)
+    if (cmd->batch) {
+        if (cmd->dev_num < 0) {
+            fprintf(stderr, "Batch mode (-f/-i) does not support -b/--both\n");
+            return -1;
+        }
         return 0;
+    }
 
     if (!cmd->is_read && argc - data_start < 3) {
         fprintf(stderr, "Write cmd needs at least data_type delay payload_len\n");
@@ -275,11 +280,17 @@ int write_register(struct command *cmd) {
     }
 
     if (cmd->dev_num < 0) {
+        int r;
+
         snprintf(dev_path, sizeof(dev_path), "/dev/mipi_dsi0");
-        ret0 = execute_command(dev_path, tx_buf, total_len);
+        for (r = 0; r < cmd->dup; r++)
+            if ((ret0 = execute_command(dev_path, tx_buf, total_len)) == 0)
+                break;
 
         snprintf(dev_path, sizeof(dev_path), "/dev/mipi_dsi1");
-        ret1 = execute_command(dev_path, tx_buf, total_len);
+        for (r = 0; r < cmd->dup; r++)
+            if ((ret1 = execute_command(dev_path, tx_buf, total_len)) == 0)
+                break;
 
         if (ret0 < 0 || ret1 < 0) {
             fprintf(stderr, "write failed: dsi0=%s dsi1=%s\n",
@@ -514,9 +525,11 @@ static int batch_ioctl_from_file(const char *path, struct command *proto)
             continue;
         }
         if (len + 4 + plen > cap) {
+            void *nb;
             cap *= 2;
-            buf = realloc(buf, cap);
-            if (!buf) { fclose(f); return -1; }
+            nb = realloc(buf, cap);
+            if (!nb) { free(buf); fclose(f); return -1; }
+            buf = nb;
         }
         {
             unsigned char tmp[256];
@@ -538,9 +551,11 @@ static int batch_ioctl_from_file(const char *path, struct command *proto)
             if (plen < 0) continue;
 
             if (len + (size_t)tlen * proto->dup > cap) {
+                void *nb;
                 while (len + (size_t)tlen * proto->dup > cap) cap *= 2;
-                buf = realloc(buf, cap);
-                if (!buf) { fclose(f); return -1; }
+                nb = realloc(buf, cap);
+                if (!nb) { free(buf); fclose(f); return -1; }
+                buf = nb;
             }
             for (int d = 0; d < proto->dup; d++) {
                 memcpy(buf + len, tmp, tlen);
