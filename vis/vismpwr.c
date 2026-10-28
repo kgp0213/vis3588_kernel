@@ -608,7 +608,7 @@ void print_usage() {
 }
 
 void print_version() {
-    printf("vismpwr 2026-05-07\n");
+    printf("vismpwr 2026-10-28\n");
 }
 
 int main(int argc, char *argv[]) {
