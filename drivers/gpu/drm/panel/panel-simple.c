@@ -1282,7 +1282,7 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
 	int gpio_value;
 	{//按键按下时不使用vis-timing.bin内容
 		int dsc_det_gpio;
-		enum of_gpio_flags flags;
+		enum of_gpio_flags flags = 0;
 		dev_info(dev, "start detect GPIO for block get_firmware_desc_data_binfile\n");
 		// 1. 查找GPIO配置节点
 		dsc_np = of_find_node_by_name(NULL, "no-dsc-gpio");
