@@ -148,6 +148,7 @@ struct panel_simple {
 	bool power_invert;
 	bool no_hpd;
 	bool dcs_bl_send_brightness;
+	u8 dcs_bl_flags;		/* bit0 字节序, bit1 |0x80, bit2 4字节重复, bit3 保留 */
 
 	const struct panel_desc *desc;
 
@@ -370,13 +371,6 @@ static int panel_simple_xfer_dsi_cmd_seq(struct panel_simple *panel,
 		case MIPI_DSI_DCS_SHORT_WRITE:
 		case MIPI_DSI_DCS_SHORT_WRITE_PARAM:
 		case MIPI_DSI_DCS_LONG_WRITE:
-			/*
-			 * 0x50 <value> 是本平台约定的"最大亮度"元数据，
-			 * 只给驱动解析用，不下发给面板。
-			 */
-			if (cmd->header.payload_length >= 2 &&
-			    cmd->payload[0] == 0x50)
-				continue;
 			err = mipi_dsi_dcs_write_buffer(dsi, cmd->payload,
 							cmd->header.payload_length);
 			break;
@@ -393,7 +387,15 @@ static int panel_simple_xfer_dsi_cmd_seq(struct panel_simple *panel,
 			err = mipi_dsi_picture_parameter_set(dsi, panel->pps);
 			break;
 		default:
-			return -EINVAL;
+			/*
+			 * 未知 data_type：跳过这一条继续发后面的命令。
+			 * 注意不能 return，否则旧固件遇到新 bin 里的扩展命令
+			 * 会中断整个初始化序列（后面的命令全部丢失 → 黑屏）。
+			 */
+			dev_warn(dev,
+				 "[panel-simple] unknown data_type 0x%02x (payload_len=%u), skip\n",
+				 cmd->header.data_type, cmd->header.payload_length);
+			continue;
 		}
 
 		if (err < 0)
@@ -931,6 +933,11 @@ static int dcs_bl_update_status(struct backlight_device *bl)
 {
 	struct panel_simple *p = bl_get_data(bl);
 	struct mipi_dsi_device *dsi = p->dsi;
+	u16 brightness = bl->props.brightness;
+	u8 hi = (brightness >> 8) & 0xff;
+	u8 lo = brightness & 0xff;
+	u8 payload[4];
+	int len;
 	int ret;
 
 	if (!p->prepared)
@@ -938,16 +945,41 @@ static int dcs_bl_update_status(struct backlight_device *bl)
 	if (!p->dcs_bl_send_brightness)
 		return 0;
 
+	/* bit0：字节序。0 = 高字节在前，1 = 低字节在前（DBV_REVERSE 屏） */
+	if (p->dcs_bl_flags & BIT(0)) {
+		u8 tmp = hi;
+
+		hi = lo;
+		lo = tmp;
+	}
+
+	/* bit1：高字节或上 0x80（海思 BCMG0 的 bit15 配置位） */
+	if (p->dcs_bl_flags & BIT(1))
+		hi |= 0x80;
+
+	payload[0] = hi;
+	payload[1] = lo;
+
+	/* bit2：4 字节模式，后两字节重复前两字节 */
+	if (p->dcs_bl_flags & BIT(2)) {
+		payload[2] = hi;
+		payload[3] = lo;
+		len = 4;
+	} else {
+		len = 2;
+	}
+
+	dev_info(p->dev, "[panel-simple] send 0x51: %*ph (brightness=%u, flags=0x%02x)\n",
+		 len, payload, brightness, p->dcs_bl_flags);
+
 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
 
-	ret = mipi_dsi_dcs_set_display_brightness_large(dsi,
-						      bl->props.brightness);
-	if (ret < 0)
-		return ret;
+	ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
+				 payload, len);
 
 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 
-	return 0;
+	return ret < 0 ? ret : 0;
 }
 
 static int dcs_bl_get_brightness(struct backlight_device *bl)
@@ -1222,6 +1254,11 @@ struct panel_desc_dsi {
 	unsigned long flags;
 	enum mipi_dsi_pixel_format format;
 	unsigned int lanes;
+
+	/* other_info[12..14]：亮度元数据（V2） */
+	u16 bl_max_brightness;		/* 0 = 未配置 */
+	u8 bl_flags;
+	u8 bl_version;
 };
 
 static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,struct device *dev,
@@ -1451,6 +1488,23 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
 
 	// 解析other_info_data中的DSI参数
 	dsi_flags = (other_info_data[1] << 8) | other_info_data[0];
+
+	/*
+	 * other_info[12..14]：亮度元数据（V2，老 bin 全 0）
+	 *   [12..13] 最大亮度（小端），0 = 未配置
+	 *   [14]     高4位=版本，低4位=标志位
+	 */
+	if (header->other_info_entry.length >= 15) {
+		desc_dsi->bl_max_brightness =
+			other_info_data[12] | (other_info_data[13] << 8);
+		desc_dsi->bl_flags = other_info_data[14] & 0x0f;
+		desc_dsi->bl_version = (other_info_data[14] >> 4) & 0x0f;
+
+		dev_info(dev,
+			 "[panel-simple] other_info brightness: max=0x%04x flags=0x%02x ver=%u\n",
+			 desc_dsi->bl_max_brightness, desc_dsi->bl_flags,
+			 desc_dsi->bl_version);
+	}
 	format_type = other_info_data[4];
 	lanes = other_info_data[5];
 
@@ -1883,10 +1937,10 @@ static int panel_simple_dsi_of_get_desc_data(struct device *dev,
 }
 
 /*
- * 从初始化序列里解析亮度信息（面板相关参数全部跟随 bin，驱动不硬编码）：
- *   0x50 <val>        : 面板最大亮度（本平台约定，仅驱动内部使用）
- *   0x51 <hi><lo>     : 当前亮度，取最后一条
+ * 从初始化序列里解析初始亮度（面板相关参数全部跟随 bin，驱动不硬编码）：
+ *   0x51 <hi><lo> : 当前亮度，取最后一条（前面的会被覆盖）
  *
+ * 最大亮度不在这里取，见 bin 的 other_info[12..13]。
  * 返回值：是否解析到 0x51
  */
 static bool panel_simple_dsi_parse_brightness(struct device *dev,
@@ -1915,13 +1969,7 @@ static bool panel_simple_dsi_parse_brightness(struct device *dev,
 		else
 			val = cmd->payload[1];
 
-		if (cmd->payload[0] == 0x50) {
-			dev_info(dev,
-				 "[panel-simple] init_seq[%02d]: 0x50 (max brightness) = 0x%04x (%u), payload_len=%u\n",
-				 i, val, val, cmd->header.payload_length);
-			*max_br = val;
-			*has_max = true;
-		} else if (cmd->payload[0] == 0x51) {
+		if (cmd->payload[0] == 0x51) {
 			dev_info(dev,
 				 "[panel-simple] init_seq[%02d]: 0x51 (brightness) = 0x%04x (%u), payload_len=%u\n",
 				 i, val, val, cmd->header.payload_length);
@@ -1987,16 +2035,23 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 						  "dcs-backlight-brightness",
 						  &dcs_bl_brightness);
 
-		if (pdesc)
+		if (pdesc) {
 			has_bin_init = panel_simple_dsi_parse_brightness(dev, pdesc,
 									&bin_init_br,
 									&bin_max_br,
 									&has_bin_max);
+			/* other_info[12..14] 里的 V2 元数据 */
+			if (pdesc->bl_max_brightness) {
+				bin_max_br = pdesc->bl_max_brightness;
+				has_bin_max = true;
+			}
+			panel->dcs_bl_flags = pdesc->bl_flags;
+		}
 
 		/*
 		 * 最大亮度优先级：
-		 *   1) bin 里的 0x50
-		 *   2) bin 里的 0x51（没有 0x50 时）
+		 *   1) bin 的 other_info[12..13]
+		 *   2) bin 里最后一条 0x51
 		 *   3) 设备树 dcs-backlight-max-brightness
 		 *   4) U16_MAX
 		 */
@@ -2034,10 +2089,11 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 			bl_name = dev_name(dev);
 
 		dev_info(dev,
-			 "[panel-simple] dcs backlight: name=%s brightness=%u max=%u\n",
-			 bl_name, dcs_bl_brightness, dcs_bl_max_brightness);
+			 "[panel-simple] dcs backlight: name=%s brightness=%u max=%u flags=0x%02x\n",
+			 bl_name, dcs_bl_brightness, dcs_bl_max_brightness,
+			 panel->dcs_bl_flags);
 		dev_info(dev,
-			 "[panel-simple] brightness source: 0x51=%s(0x%04x) 0x50=%s(0x%04x) dt_brightness=%s dt_max=%s\n",
+			 "[panel-simple] brightness source: 0x51=%s(0x%04x) other_info_max=%s(0x%04x) dt_brightness=%s dt_max=%s\n",
 			 has_bin_init ? "bin" : "none", bin_init_br,
 			 has_bin_max ? "bin" : "none", bin_max_br,
 			 has_dt_br ? "yes" : "no", has_dt_max ? "yes" : "no");
