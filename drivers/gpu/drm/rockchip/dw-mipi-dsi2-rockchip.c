@@ -176,7 +176,7 @@
 #define DSI2_MAX_REGISGER		DSI2_INT_FORCE_CRI
 
 #define MODE_STATUS_TIMEOUT_US		10000
-#define CMD_PKT_STATUS_TIMEOUT_US	20000
+#define CMD_PKT_STATUS_TIMEOUT_US	100000
 #define PSEC_PER_SEC			1000000000000LL
 
 #define GRF_REG_FIELD(reg, lsb, msb)	(((reg) << 16) | ((lsb) << 8) | (msb))
@@ -282,6 +282,7 @@ struct dw_mipi_dsi2 {
 	struct gpio_desc *te_gpio;
 
 	struct miscdevice miscdev;
+	struct mutex cmd_lock;	/* 串行化 CRI 访问：面板初始化与 /dev/mipi_dsiN 共用 */
 	u8 *rx_buf;		// 接收缓冲区 dsi_raw_read 使用
 	size_t rx_len;	// 当前有效数据长度 dsi_raw_read 使用
 	bool data_ready;// 数据就绪标志
@@ -430,19 +431,33 @@ static int dw_mipi_dsi2_is_cmd_mode(struct dw_mipi_dsi2 *dsi2)
 
 static int cri_fifos_wait_avail(struct dw_mipi_dsi2 *dsi2)
 {
-	u32 sts, mask;
-	int ret;
+	u32 sts = 0, mask;
+	int ret = -ETIMEDOUT;
+	int i;
 
 	mask = CRI_BUSY | CRT_FIFOS_NOT_EMPTY;
-	ret = regmap_read_poll_timeout(dsi2->regmap, DSI2_CORE_STATUS, sts,
-				       !(sts & mask), 0,
-				       CMD_PKT_STATUS_TIMEOUT_US);
-	if (ret < 0) {
-		DRM_DEV_ERROR(dsi2->dev, "command interface is busy\n");
-		return ret;
+
+	/*
+	 * 连续高频下发命令时，上一条命令可能还在 CRI/FIFO 里没发完，
+	 * 单次 20ms 的等待会偶发 -ETIMEDOUT(-110)。这里改成：
+	 *   - 每次最多等 100ms，轮询间隔 50us（不要忙等占满 CPU）
+	 *   - 超时后再重试 2 轮，给视频模式下插入命令留足一帧以上的余量
+	 */
+	for (i = 0; i < 3; i++) {
+		ret = regmap_read_poll_timeout(dsi2->regmap, DSI2_CORE_STATUS,
+					       sts, !(sts & mask), 50,
+					       CMD_PKT_STATUS_TIMEOUT_US);
+		if (!ret)
+			return 0;
+
+		usleep_range(1000, 2000);
 	}
 
-	return 0;
+	DRM_DEV_ERROR(dsi2->dev,
+		      "command interface is busy, status=0x%08x (%d tries)\n",
+		      sts, i);
+
+	return ret;
 }
 
 static void dw_mipi_dsi2_irq_enable(struct dw_mipi_dsi2 *dsi2, bool enable)
@@ -2193,13 +2208,26 @@ static int dw_mipi_dsi2_read_from_fifo(struct dw_mipi_dsi2 *dsi2,
 	u16 wc;
 	int i, j, ret, len = msg->rx_len;
 	unsigned int vrefresh = drm_mode_vrefresh(&dsi2->mode);
+	u32 timeout_us;
 	u32 val;
+
+	/*
+	 * 原来只等一帧（119Hz 下约 8.4ms），面板响应稍慢就返回 -ETIMEDOUT(-110)。
+	 * 改成至少等 50ms，并在 vrefresh 异常时兜底。
+	 */
+	if (!vrefresh)
+		vrefresh = 60;
+	timeout_us = DIV_ROUND_UP(1000000, vrefresh) * 2;
+	if (timeout_us < 50000)
+		timeout_us = 50000;
 
 	ret = regmap_read_poll_timeout(dsi2->regmap, DSI2_CORE_STATUS,
 				       val, val & CRI_RD_DATA_AVAIL,
-				       0, DIV_ROUND_UP(1000000, vrefresh));
+				       50, timeout_us);
 	if (ret) {
-		DRM_DEV_ERROR(dsi2->dev, "CRI has no available read data\n");
+		DRM_DEV_ERROR(dsi2->dev,
+			      "CRI has no available read data (status=0x%08x, timeout=%uus)\n",
+			      val, timeout_us);
 		return ret;
 	}
 
@@ -2244,6 +2272,12 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 	int ret;
 	u32 val;
 	u32 mode;
+
+	/*
+	 * 面板初始化（prepare/enable）和用户态 /dev/mipi_dsiN 都走这里，
+	 * 没有这把锁时两条路径会交叉写 CRI FIFO/头，表现为偶发 -ETIMEDOUT(-110)。
+	 */
+	mutex_lock(&dsi2->cmd_lock);
 
 	pm_runtime_get_sync(dsi2->dev);
 	dw_mipi_dsi2_clk_management(dsi2);
@@ -2307,7 +2341,8 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 	if (msg->rx_len) {
 		 if (!msg->rx_buf) {// 确保使用正确的缓冲区
             dev_err(dsi2->dev, "No rx buffer provided!");
-            return -EINVAL;
+            ret = -EINVAL;
+            goto err;
         }
 		dev_dbg(dsi2->dev, "prepare to read %zu bytes from FIFO\n", msg->rx_len);
 		//udelay(100);
@@ -2337,11 +2372,14 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 	if (dsi2->slave)
 		dw_mipi_dsi2_transfer(dsi2->slave, msg);
 
+	mutex_unlock(&dsi2->cmd_lock);
+
 	dev_dbg(dsi2->dev, "dw_mipi_dsi2_transfer %zu byte done\n",msg->tx_len);
 	return msg->tx_len;
 
 err:
 	pm_runtime_put(dsi2->dev);
+	mutex_unlock(&dsi2->cmd_lock);
 	return ret;
 }
 
@@ -2617,6 +2655,7 @@ static int dw_mipi_dsi2_probe(struct platform_device *pdev)
 		id = 0;
 
 	dsi2->dev = dev;
+	mutex_init(&dsi2->cmd_lock);
 	dsi2->id = id;
 	dsi2->pdata = of_device_get_match_data(dev);
 	platform_set_drvdata(pdev, dsi2);
