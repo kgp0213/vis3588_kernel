@@ -8,7 +8,7 @@
 #include <sys/ioctl.h>
 #include <time.h>
 
-#define MAX_RETRIES 5
+#define MAX_RETRIES 10
 #define RETRY_DELAY_MS 1
 #define MAX_DATA_LEN 262
 
@@ -176,13 +176,32 @@ int execute_command(const char *dev_path, const void *cmd, int count) {
         return -1;
     }
     int retries = 0;
+    int delay = RETRY_DELAY_MS;
+
     while (retries < MAX_RETRIES) {
-        if (write(fd, cmd, count) == count) {  // write() 成功执行后会返回写入的数量。return ret<0?ret:count;// 返回错误 或者 成功写入的字节数
+        ssize_t n = write(fd, cmd, count);
+        if (n == count) {  // 成功写入 count 字节
             close(fd);
             return 0;
         }
+
         retries++;
-        delay_ms(RETRY_DELAY_MS);
+        if (retries >= MAX_RETRIES) {
+            if (n < 0)
+                fprintf(stderr,
+                        "write %s failed after %d tries: %s (%d)\n",
+                        dev_path, retries, strerror(errno), errno);
+            else
+                fprintf(stderr,
+                        "short write %s: %zd/%d after %d tries\n",
+                        dev_path, n, count, retries);
+            break;
+        }
+
+        /* 出错后指数退避：1,2,4,8,16ms... 给驱动 CRI/FIFO 排空的时间 */
+        delay_ms(delay);
+        if (delay < 16)
+            delay *= 2;
     }
     close(fd);
     return -1;
