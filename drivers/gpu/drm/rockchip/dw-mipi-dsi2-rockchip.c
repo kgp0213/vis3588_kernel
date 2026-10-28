@@ -1006,7 +1006,16 @@ static void dw_mipi_dsi2_clk_management(struct dw_mipi_dsi2 *dsi2)
 	 * initial deskew calibration is send after phy_power_on,
 	 * then we can configure clk_type.
 	 */
-	if (dsi2->mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS)
+	/*
+	 * CMD(EDPI) 模式下必须用非连续时钟：
+	 * 连续时钟会让 clock lane 一直停在 HS，面板看不到 LP-11，
+	 * 表现为"第一次 HS 命令之后，所有 LP 命令（写+回读）全部失效"。
+	 * 实测：flags=0x0a00（无 NON_CONTINUOUS）时 -r 02 51 恒为 00 00；
+	 *       加上 BIT(10) 后回读正常、HS/LP 可混用。
+	 * 所以 CMD 模式在这里强制非连续，不依赖 bin 是否带该标志。
+	 */
+	if (!(dsi2->mode_flags & MIPI_DSI_MODE_VIDEO) ||
+	    (dsi2->mode_flags & MIPI_DSI_CLOCK_NON_CONTINUOUS))
 		clk_type = NON_CONTINUOUS_CLK;
 	else
 		clk_type = CONTIUOUS_CLK;
@@ -2233,6 +2242,8 @@ static int dw_mipi_dsi2_read_from_fifo(struct dw_mipi_dsi2 *dsi2,
 
 	regmap_read(dsi2->regmap, DSI2_CRI_RX_HDR, &val);
 	data_type = val & 0x3f;
+	dev_info(dsi2->dev, "RX hdr=0x%08x dt=0x%02x wc=%u rx_len=%d\n",
+		 val, data_type, (val >> 8) & 0xffff, len);
 
 	if (mipi_dsi_packet_format_is_short(data_type)) {
 		for (i = 0; i < len && i < 2; i++)
