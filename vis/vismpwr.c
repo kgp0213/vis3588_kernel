@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <sys/ioctl.h>
 #include <time.h>
+#include <stdint.h>
 
 /*
  * 只对"可重试"的瞬时错误重试，且最多 2 次。
@@ -104,6 +105,11 @@ int parse_args(int argc, char *argv[], struct command *cmd) {
         }
         else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
             cmd->batch = 1;
+            data_start += 2;
+            i++;
+        }
+        else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
+            cmd->batch = 2;
             data_start += 2;
             i++;
         }
@@ -449,13 +455,109 @@ static int batch_from_file(const char *path, struct command *proto) {
     return fail ? -1 : 0;
 }
 
+/* ---- 批量 ioctl（DSI2_IOC_BATCH）---- */
+struct dsi2_batch_req {
+    unsigned int count;
+    unsigned int len;
+    unsigned long long data;
+};
+
+#define DSI2_IOC_MAGIC   'D'
+#define DSI2_IOC_BATCH   _IOW(DSI2_IOC_MAGIC, 1, struct dsi2_batch_req)
+
+static int batch_ioctl_from_file(const char *path, struct command *proto)
+{
+    FILE *f = fopen(path, "r");
+    char line[1024];
+    int lineno = 0, count = 0;
+    size_t cap = 1024 * 1024, len = 0;
+    unsigned char *buf;
+    char dev_path[32];
+    struct dsi2_batch_req req;
+    int fd, ret;
+
+    if (!f) {
+        fprintf(stderr, "open %s failed: %s (%d)\n", path, strerror(errno), errno);
+        return -1;
+    }
+
+    buf = malloc(cap);
+    if (!buf) { fclose(f); return -1; }
+
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line, *tok;
+        int dt, delay, plen, i;
+
+        lineno++;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '\0' || *p == '\n' || *p == '#' || *p == '\r') continue;
+
+        tok = strtok(p, " \t\r\n"); if (!tok) continue; dt = parse_hex_byte(tok);
+        tok = strtok(NULL, " \t\r\n"); if (!tok) continue; delay = parse_hex_byte(tok);
+        tok = strtok(NULL, " \t\r\n"); if (!tok) continue; plen = parse_hex_byte(tok);
+        if (dt < 0 || delay < 0 || plen <= 0 || plen > 200) {
+            fprintf(stderr, "line %d: bad header\n", lineno);
+            continue;
+        }
+        if (len + 4 + plen > cap) {
+            cap *= 2;
+            buf = realloc(buf, cap);
+            if (!buf) { fclose(f); return -1; }
+        }
+        buf[len++] = (unsigned char)dt;
+        buf[len++] = (unsigned char)delay;
+        buf[len++] = (unsigned char)plen;
+        buf[len++] = (unsigned char)(proto->use_lpm ? 1 : 0);  /* bit0: 1=LP */
+
+        for (i = 0; i < plen; i++) {
+            tok = strtok(NULL, " \t\r\n");
+            if (!tok || parse_hex_byte(tok) < 0) {
+                fprintf(stderr, "line %d: bad payload\n", lineno);
+                len -= 4;
+                plen = -1;
+                break;
+            }
+            buf[len++] = (unsigned char)parse_hex_byte(tok);
+        }
+        if (plen < 0) continue;
+        count++;
+    }
+    fclose(f);
+
+    snprintf(dev_path, sizeof(dev_path), "/dev/mipi_dsi%d", proto->dev_num);
+    fd = open(dev_path, O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "open %s failed: %s (%d)\n", dev_path, strerror(errno), errno);
+        free(buf);
+        return -1;
+    }
+
+    req.count = count;
+    req.len = len;
+    req.data = (unsigned long long)(uintptr_t)buf;
+
+    ret = ioctl(fd, DSI2_IOC_BATCH, &req);
+    if (ret < 0) {
+        fprintf(stderr, "ioctl batch failed: %s (%d), sent=%d\n",
+                strerror(errno), errno, count);
+        close(fd);
+        free(buf);
+        return -1;
+    }
+    printf("ioctl batch done: %d commands, %zu bytes, ret=%d\n", count, len, ret);
+    close(fd);
+    free(buf);
+    return 0;
+}
+
 void print_usage() {
     printf("Usage:\n");
     printf("  Write: vismpwr [-0|-1|-b] [-lp|-hs] data_type delay payload_len payload...\n");
     printf("    e.g. vismpwr -hs 29 00 03 51 12 34\n");
     printf("    e.g. vismpwr -b -hs 29 00 03 51 12 34\n");
     printf("    default write mode is LP; add -hs to send in HS mode\n");
-    printf("  Batch: vismpwr [-0|-1] [-lp|-hs] -f <file>   (one command per line)\n");
+    printf("  Batch: vismpwr [-0|-1] [-lp|-hs] -f <file>   (one command per line, write())\n");
+    printf("  Batch: vismpwr [-0|-1] [-lp|-hs] -i <file>   (one command per line, ioctl)\n");
     printf("  Read: vismpwr -r [-0|-1] [-lp|-hs] read_len read_reg\n");
     printf("    read does not support -b/--both\n");
     printf("    e.g. vismpwr -r 02 51          (LP read)\n");
@@ -470,11 +572,16 @@ int main(int argc, char *argv[]) {
     struct command cmd;
     int ret;
     const char *batch_file = NULL;
+    const char *ioctl_file = NULL;
     int i;
 
     for (i = 1; i < argc - 1; i++) {
         if (strcmp(argv[i], "-f") == 0) {
             batch_file = argv[i + 1];
+            break;
+        }
+        if (strcmp(argv[i], "-i") == 0) {
+            ioctl_file = argv[i + 1];
             break;
         }
     }
@@ -492,6 +599,8 @@ int main(int argc, char *argv[]) {
         print_usage();
         return 1;
     }
+    if (cmd.batch == 2 && ioctl_file)
+        return batch_ioctl_from_file(ioctl_file, &cmd) == 0 ? 0 : 1;
     if (batch_file)
         return batch_from_file(batch_file, &cmd) == 0 ? 0 : 1;
 
