@@ -26,6 +26,7 @@ struct command {
     int dev_num;        // 0/1，-1 表示同时写 dsi0+dsi1
     int use_lpm;        // 1: LP模式(默认) 0: HS模式
     int batch;          // 1: 批量文件模式
+    int dup;            // 每条命令重复发送次数（默认 1）
     unsigned char read_len;  // 用于读 模式下的读取长度（1字节）
     unsigned char read_reg;  //用于读 模式下的读取长度  寄存器地址（1字节）
     unsigned char data[MAX_DATA_LEN]; // 数据内容 写模式下包含data_type/flags 在内容数据
@@ -66,6 +67,7 @@ int parse_args(int argc, char *argv[], struct command *cmd) {
     memset(cmd, 0, sizeof(struct command));
     cmd->dev_num = 0; //默认mipi_dsi
     cmd->use_lpm = 1; //默认LP模式
+    cmd->dup = 1;
     //cmd->is_read=0;   //默认写入
 
     if (argc < 2) {
@@ -105,6 +107,13 @@ int parse_args(int argc, char *argv[], struct command *cmd) {
         }
         else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
             cmd->batch = 1;
+            data_start += 2;
+            i++;
+        }
+        else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
+            cmd->dup = atoi(argv[i + 1]);
+            if (cmd->dup < 1) cmd->dup = 1;
+            if (cmd->dup > 5) cmd->dup = 5;
             data_start += 2;
             i++;
         }
@@ -441,12 +450,14 @@ static int batch_from_file(const char *path, struct command *proto) {
             if (i != plen) { fail++; continue; }
         }
 
-        if (dev_write_fd(fd, dev_path, tx_buf, total) < 0) {
-            fprintf(stderr, "line %d: write failed\n", lineno);
-            fail++;
-        } else {
-            ok++;
+        for (int r = 0; r < proto->dup; r++) {
+            if (dev_write_fd(fd, dev_path, tx_buf, total) < 0) {
+                fprintf(stderr, "line %d: write failed\n", lineno);
+                fail++;
+                break;
+            }
         }
+        ok++;
     }
 
     close(fd);
@@ -504,23 +515,36 @@ static int batch_ioctl_from_file(const char *path, struct command *proto)
             buf = realloc(buf, cap);
             if (!buf) { fclose(f); return -1; }
         }
-        buf[len++] = (unsigned char)dt;
-        buf[len++] = (unsigned char)delay;
-        buf[len++] = (unsigned char)plen;
-        buf[len++] = (unsigned char)(proto->use_lpm ? 1 : 0);  /* bit0: 1=LP */
+        {
+            unsigned char tmp[256];
+            int tlen = 0;
+            tmp[tlen++] = (unsigned char)dt;
+            tmp[tlen++] = (unsigned char)delay;
+            tmp[tlen++] = (unsigned char)plen;
+            tmp[tlen++] = (unsigned char)(proto->use_lpm ? 1 : 0);  /* bit0: 1=LP */
 
-        for (i = 0; i < plen; i++) {
-            tok = strtok(NULL, " \t\r\n");
-            if (!tok || parse_hex_byte(tok) < 0) {
-                fprintf(stderr, "line %d: bad payload\n", lineno);
-                len -= 4;
-                plen = -1;
-                break;
+            for (i = 0; i < plen; i++) {
+                tok = strtok(NULL, " \t\r\n");
+                if (!tok || parse_hex_byte(tok) < 0) {
+                    fprintf(stderr, "line %d: bad payload\n", lineno);
+                    plen = -1;
+                    break;
+                }
+                tmp[tlen++] = (unsigned char)parse_hex_byte(tok);
             }
-            buf[len++] = (unsigned char)parse_hex_byte(tok);
+            if (plen < 0) continue;
+
+            if (len + (size_t)tlen * proto->dup > cap) {
+                while (len + (size_t)tlen * proto->dup > cap) cap *= 2;
+                buf = realloc(buf, cap);
+                if (!buf) { fclose(f); return -1; }
+            }
+            for (int d = 0; d < proto->dup; d++) {
+                memcpy(buf + len, tmp, tlen);
+                len += tlen;
+                count++;          /* count 是实际下发的命令条数（含重复） */
+            }
         }
-        if (plen < 0) continue;
-        count++;
     }
     fclose(f);
 
@@ -558,6 +582,7 @@ void print_usage() {
     printf("    default write mode is LP; add -hs to send in HS mode\n");
     printf("  Batch: vismpwr [-0|-1] [-lp|-hs] -f <file>   (one command per line, write())\n");
     printf("  Batch: vismpwr [-0|-1] [-lp|-hs] -i <file>   (one command per line, ioctl)\n");
+    printf("  Dup  : -d N  (每条命令重复 N 次，默认 1；HS 建议 2)\n");
     printf("  Read: vismpwr -r [-0|-1] [-lp|-hs] read_len read_reg\n");
     printf("    read does not support -b/--both\n");
     printf("    e.g. vismpwr -r 02 51          (LP read)\n");
