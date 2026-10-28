@@ -2367,7 +2367,8 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 		// );
 	}
 
-	pm_runtime_put(dsi2->dev);
+	pm_runtime_mark_last_busy(dsi2->dev);
+	pm_runtime_put_autosuspend(dsi2->dev);
 
 	if (dsi2->slave)
 		dw_mipi_dsi2_transfer(dsi2->slave, msg);
@@ -2378,7 +2379,8 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 	return msg->tx_len;
 
 err:
-	pm_runtime_put(dsi2->dev);
+	pm_runtime_mark_last_busy(dsi2->dev);
+	pm_runtime_put_autosuspend(dsi2->dev);
 	mutex_unlock(&dsi2->cmd_lock);
 	return ret;
 }
@@ -2620,8 +2622,9 @@ static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
 		dsi2->data_ready = true;
 	}
 
-	if (cmd_buf[1] + 1)
-		msleep(cmd_buf[1] + 1);
+	/* 只有调用方显式要求延时（delay 字节非 0）才 sleep，不再强制 +1ms */
+	if (cmd_buf[1])
+		msleep(cmd_buf[1]);
 
 out_free:
 	kfree(cmd_buf);
@@ -2790,6 +2793,13 @@ static int dw_mipi_dsi2_probe(struct platform_device *pdev)
 	 * unbind/remove 路径的 disable 次数失配，触发 "Unbalanced
 	 * pm_runtime_enable!"。
 	 */
+	/*
+	 * 每条命令都走 pm_runtime_get_sync()/put() 时，若没有 autosuspend，
+	 * put() 会立即 suspend（关 pclk/sys_clk），下一条命令再 resume，
+	 * 单条命令要多花 ~10ms。这里加 1 秒 autosuspend：连续下发时时钟保持开启。
+	 */
+	pm_runtime_set_autosuspend_delay(dev, 1000);
+	pm_runtime_use_autosuspend(dev);
 	pm_runtime_enable(dev);
 	dev_info(dev, "DSI%d initialized, device node: /dev/%s\n",dsi2->id, dsi2->miscdev.name);
 	// 初始化接收缓冲区
