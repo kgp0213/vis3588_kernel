@@ -2281,8 +2281,8 @@ static int dw_mipi_dsi2_read_from_fifo(struct dw_mipi_dsi2 *dsi2,
 
 	regmap_read(dsi2->regmap, DSI2_CRI_RX_HDR, &val);
 	data_type = val & 0x3f;
-	dev_info(dsi2->dev, "RX hdr=0x%08x dt=0x%02x wc=%u rx_len=%d\n",
-		 val, data_type, (val >> 8) & 0xffff, len);
+	dev_dbg(dsi2->dev, "RX hdr=0x%08x dt=0x%02x wc=%u rx_len=%d\n",
+		val, data_type, (val >> 8) & 0xffff, len);
 
 	if (mipi_dsi_packet_format_is_short(data_type)) {
 		for (i = 0; i < len && i < 2; i++)
@@ -2697,12 +2697,6 @@ out_free:
 
 // 3. 文件操作结构体定义
 /* ---- 批量下发 ioctl ---- */
-struct dsi2_batch_cmd {
-	__u32 len;			/* 本条命令总长度（4 字节头 + payload） */
-	__u32 pad;
-	__u8 data[];			/* [type][delay][payload_len][flags][payload...] */
-};
-
 struct dsi2_batch_req {
 	__u32 count;			/* 命令条数 */
 	__u32 len;			/* data 总字节数 */
