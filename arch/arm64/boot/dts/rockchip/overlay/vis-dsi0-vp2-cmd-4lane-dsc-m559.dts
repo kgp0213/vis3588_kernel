@@ -45,9 +45,13 @@
 				status = "okay";
 				compatible = "simple-panel-dsi";
 				reg = <0>;
-				backlight = <&backlight_dsi0>;
+				//backlight = <&backlight_dsi0>;   /* OLED 无背光 */
 				power-supply = <&mipi_dsi0_power>;
 				reset-gpios = <&gpio3 RK_PB6 GPIO_ACTIVE_HIGH>;
+				/* OLED 亮度通过 DCS 0x51 控制（走 other_info/0x51 元数据），无 PWM 背光 */
+				dcs-backlight-send-brightness;
+				dcs-backlight-name = "oled";
+				dcs-backlight-brightness = <0x1234>;   /* 默认值，通常被 bin 里的 0x51 覆盖 */
 
 				enable-delay-ms = <35>;
 				prepare-delay-ms = <6>;
@@ -207,7 +211,7 @@
 
 		__overlay__ {
 			backlight_dsi0: backlight-dsi0 {
-				status = "okay";
+				status = "disabled";
 				compatible = "pwm-backlight";
 				pwms = <&pwm12 0 25000 0>;
 				brightness-levels = <

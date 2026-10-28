@@ -57,7 +57,7 @@
 				status = "okay";
 				compatible = "simple-panel-dsi", "panel-dsi-vis";
 				reg = <0>;
-				backlight = <&backlight_dsi0>;
+				//backlight = <&backlight_dsi0>;   /* OLED 无背光 */
 				power-supply = <&mipi_dsi0_power>;
 				reset-gpios = <&gpio3 RK_PB6 GPIO_ACTIVE_HIGH>;
 
@@ -225,7 +225,7 @@
 
 		__overlay__ {
 			backlight_dsi0: backlight-dsi0 {
-				status = "okay";
+				status = "disabled";
 				compatible = "pwm-backlight";
 				pwms = <&pwm12 0 25000 0>;
 				brightness-levels = <
