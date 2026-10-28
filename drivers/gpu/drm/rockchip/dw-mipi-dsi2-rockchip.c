@@ -851,8 +851,14 @@ static void dw_mipi_dsi2_tx_option_set(struct dw_mipi_dsi2 *dsi2)
 
 	val = BTA_EN | EOTP_TX_EN;
 
-	if (dsi2->mode_flags & MIPI_DSI_MODE_EOT_PACKET)
-		val &= ~EOTP_TX_EN;
+	/*
+	 * 5.10 的 MIPI_DSI_MODE_EOT_PACKET 语义是"面板支持 EOT packet"，
+	 * 应该【使能】EOTp 发送；原代码在置位时反而关掉 EOTP_TX_EN，
+	 * 与 6.1/u-boot 的写法（仅 NO_EOT_PACKET 才关）相反。
+	 * 缺少 EOTp 时 HS 传输结束不干净，面板偶发丢包（实测 ~1%），
+	 * LP 走 escape 模式不受影响 —— 正好解释"LP 100%、HS 偶发丢"的现象。
+	 */
+
 
 	regmap_write(dsi2->regmap, DSI2_DSI_GENERAL_CFG, val);
 	regmap_write(dsi2->regmap, DSI2_DSI_VCID_CFG, TX_VCID(dsi2->channel));
