@@ -8,7 +8,12 @@
 #include <sys/ioctl.h>
 #include <time.h>
 
-#define MAX_RETRIES 10
+/*
+ * 只对"可重试"的瞬时错误重试，且最多 2 次。
+ * 内核侧已经做了 CRI 串行化 + 100ms x3 的等待，这里再盲目重试
+ * 确定性错误（EINVAL 等）没有意义，还可能把已经发出去的命令重发一遍。
+ */
+#define MAX_RETRIES 2
 #define RETRY_DELAY_MS 1
 #define MAX_DATA_LEN 262
 
@@ -169,40 +174,51 @@ int parse_args(int argc, char *argv[], struct command *cmd) {
     return 0;
 }
 
+static int is_transient_error(int err)
+{
+    return err == ETIMEDOUT || err == EBUSY || err == EAGAIN || err == EINTR;
+}
+
 int execute_command(const char *dev_path, const void *cmd, int count) {
     int fd = open(dev_path, O_RDWR);
     if (fd < 0) {
-        perror("Open device failed");
+        fprintf(stderr, "open %s failed: %s (%d)\n",
+                dev_path, strerror(errno), errno);
         return -1;
     }
-    int retries = 0;
+
+    int attempt = 0;
     int delay = RETRY_DELAY_MS;
 
-    while (retries < MAX_RETRIES) {
+    for (;;) {
         ssize_t n = write(fd, cmd, count);
-        if (n == count) {  // 成功写入 count 字节
+        if (n == count) {
             close(fd);
             return 0;
         }
 
-        retries++;
-        if (retries >= MAX_RETRIES) {
+        int err = (n < 0) ? errno : 0;
+
+        /* 确定性错误、短写、或重试次数用尽：直接报错退出 */
+        if (n >= 0 || !is_transient_error(err) || attempt >= MAX_RETRIES) {
             if (n < 0)
                 fprintf(stderr,
-                        "write %s failed after %d tries: %s (%d)\n",
-                        dev_path, retries, strerror(errno), errno);
+                        "write %s failed: %s (%d), %d retries\n",
+                        dev_path, strerror(err), err,
+                        attempt);
             else
                 fprintf(stderr,
-                        "short write %s: %zd/%d after %d tries\n",
-                        dev_path, n, count, retries);
+                        "write %s short write: %zd/%d, %d retries\n",
+                        dev_path, n, count, attempt);
             break;
         }
 
-        /* 出错后指数退避：1,2,4,8,16ms... 给驱动 CRI/FIFO 排空的时间 */
+        /* 只对瞬时错误退避重试：1ms, 2ms */
+        attempt++;
         delay_ms(delay);
-        if (delay < 16)
-            delay *= 2;
+        delay *= 2;
     }
+
     close(fd);
     return -1;
 }
