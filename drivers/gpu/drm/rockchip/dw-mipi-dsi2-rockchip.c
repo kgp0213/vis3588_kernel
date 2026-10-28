@@ -2772,6 +2772,11 @@ static int dsi2_do_raw_cmd(struct dw_mipi_dsi2 *dsi2, u8 *cmd_buf, size_t count)
 	return 0;
 }
 
+/*
+ * 注意：批量 ioctl 不保证原子性。每条命令独立持有 cmd_lock
+ * （取/发/还），批与批之间可能被其它进程的 write/ioctl 穿插。
+ * 需要独占总线的场景请由调用方自行串行化。
+ */
 static long dsi_raw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct dw_mipi_dsi2 *dsi2 = file->private_data;
