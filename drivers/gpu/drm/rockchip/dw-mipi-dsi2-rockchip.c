@@ -460,6 +460,31 @@ static int cri_fifos_wait_avail(struct dw_mipi_dsi2 *dsi2)
 	return ret;
 }
 
+/*
+ * 等 CORE/IPI 真正发完：CRI_BUSY 只表示命令请求接口空了，
+ * 包可能还在 core/IPI 里排队。实测 HS 命令返回后偶发 core=0x101
+ * （CORE_BUSY|IPI_BUSY），此时若调用方立即读回或发下一条，会出问题。
+ * 这里补一个 core/IPI 空闲等待。
+ */
+#define CORE_IDLE_MASK		(CORE_BUSY | IPI_BUSY)
+
+static int dw_mipi_dsi2_wait_core_idle(struct dw_mipi_dsi2 *dsi2)
+{
+	u32 sts = 0;
+	int ret;
+
+	ret = regmap_read_poll_timeout(dsi2->regmap, DSI2_CORE_STATUS, sts,
+				       !(sts & CORE_IDLE_MASK), 50,
+				       CMD_PKT_STATUS_TIMEOUT_US);
+	if (ret < 0) {
+		DRM_DEV_ERROR(dsi2->dev,
+			      "core/ipi still busy, status=0x%08x\n", sts);
+		return ret;
+	}
+
+	return 0;
+}
+
 static void dw_mipi_dsi2_irq_enable(struct dw_mipi_dsi2 *dsi2, bool enable)
 {
 	if (enable) {
@@ -829,6 +854,14 @@ static void dw_mipi_dsi2_lp2hs_or_hs2lp_cfg(struct dw_mipi_dsi2 *dsi2)
 	tmp = cfg->hs_trail + cfg->hs_exit;
 	tmp = DIV_ROUND_CLOSEST_ULL(tmp << 16, ui);
 	regmap_write(dsi2->regmap, DSI2_PHY_HS2LP_MAN_CFG, PHY_HS2LP_TIME(tmp));
+
+	/*
+	 * 上游评审反馈：这颗 DSI2 需要把"最大读时间"设成 10000
+	 * （dw-mipi-dsi v1 驱动也这么做），否则 LPM 模式下收发会不干净。
+	 * 本驱动原来只定义了寄存器宏、从未写入。
+	 */
+	regmap_write(dsi2->regmap, DSI2_PHY_MAX_RD_T_MAN_CFG,
+		     PHY_MAX_RD_TIME(10000));
 }
 
 static void dw_mipi_dsi2_phy_init(struct dw_mipi_dsi2 *dsi2)
@@ -2355,6 +2388,11 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 	if (ret)
 		goto err;
 
+	/* 再等 core/IPI 真正把包发出去 */
+	ret = dw_mipi_dsi2_wait_core_idle(dsi2);
+	if (ret)
+		goto err;
+
 	if (msg->rx_len) {
 		 if (!msg->rx_buf) {// 确保使用正确的缓冲区
             dev_err(dsi2->dev, "No rx buffer provided!");
@@ -2629,6 +2667,19 @@ static ssize_t dsi_raw_write(struct file *file, const char __user *buf,
 			(msg.flags & MIPI_DSI_MSG_USE_LPM) ? "LP" : "HS",
 			payload_str, ret);
 		goto out_free;
+	}
+
+	/* 诊断：打印发送后的控制器状态，用于定位 HS 丢包 */
+	if (!(msg.flags & MIPI_DSI_MSG_USE_LPM)) {
+		u32 core_st = 0, int_cri = 0, int_main = 0, int_ack = 0;
+
+		regmap_read(dsi2->regmap, DSI2_CORE_STATUS, &core_st);
+		regmap_read(dsi2->regmap, DSI2_INT_ST_CRI, &int_cri);
+		regmap_read(dsi2->regmap, INT_ST_MAIN, &int_main);
+		regmap_read(dsi2->regmap, DSI2_INT_ST_ACK, &int_ack);
+		dev_info(dev,
+			 "HS-ST payload=[%s] core=0x%08x cri=0x%08x main=0x%08x ack=0x%08x\n",
+			 payload_str, core_st, int_cri, int_main, int_ack);
 	}
 
 	if (msg.type == MIPI_DSI_DCS_READ ||
