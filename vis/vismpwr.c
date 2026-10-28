@@ -450,14 +450,17 @@ static int batch_from_file(const char *path, struct command *proto) {
             if (i != plen) { fail++; continue; }
         }
 
+        int wfail = 0;
         for (int r = 0; r < proto->dup; r++) {
             if (dev_write_fd(fd, dev_path, tx_buf, total) < 0) {
                 fprintf(stderr, "line %d: write failed\n", lineno);
                 fail++;
+                wfail = 1;
                 break;
             }
         }
-        ok++;
+        if (!wfail)
+            ok++;
     }
 
     close(fd);
@@ -561,14 +564,14 @@ static int batch_ioctl_from_file(const char *path, struct command *proto)
     req.data = (unsigned long long)(uintptr_t)buf;
 
     ret = ioctl(fd, DSI2_IOC_BATCH, &req);
-    if (ret < 0) {
-        fprintf(stderr, "ioctl batch failed: %s (%d), sent=%d\n",
-                strerror(errno), errno, count);
+    if (ret < 0 || ret != count) {
+        fprintf(stderr, "ioctl batch failed: ret=%d (expect %d), %s\n",
+                ret, count, ret < 0 ? strerror(errno) : "partial send");
         close(fd);
         free(buf);
         return -1;
     }
-    printf("ioctl batch done: %d commands, %zu bytes, ret=%d\n", count, len, ret);
+    printf("ioctl batch done: %d commands, %zu bytes\n", count, len);
     close(fd);
     free(buf);
     return 0;
