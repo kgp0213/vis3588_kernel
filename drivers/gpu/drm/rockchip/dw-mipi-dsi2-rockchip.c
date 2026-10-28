@@ -2644,12 +2644,145 @@ out_free:
 }
 
 // 3. 文件操作结构体定义
+/* ---- 批量下发 ioctl ---- */
+struct dsi2_batch_cmd {
+	__u32 len;			/* 本条命令总长度（4 字节头 + payload） */
+	__u32 pad;
+	__u8 data[];			/* [type][delay][payload_len][flags][payload...] */
+};
+
+struct dsi2_batch_req {
+	__u32 count;			/* 命令条数 */
+	__u32 len;			/* data 总字节数 */
+	__u64 data;			/* __user 指针 */
+};
+
+#define DSI2_IOC_MAGIC		'D'
+#define DSI2_IOC_BATCH		_IOW(DSI2_IOC_MAGIC, 1, struct dsi2_batch_req)
+
+static int dsi2_do_raw_cmd(struct dw_mipi_dsi2 *dsi2, u8 *cmd_buf, size_t count)
+{
+	struct mipi_dsi_msg msg = {0};
+	struct panel_cmd_header *hdr;
+	const u8 *payload;
+	size_t header_len;
+	bool legacy_hdr = false;
+	int ret;
+
+	if (count < 4)
+		return -EINVAL;
+
+	hdr = (struct panel_cmd_header *)cmd_buf;
+	if (cmd_buf[0] == MIPI_DSI_DCS_READ && count == 5) {
+		header_len = sizeof(*hdr);
+		legacy_hdr = false;
+	} else if ((cmd_buf[0] == MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM) ||
+		   (cmd_buf[0] == MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM && count == 5) ||
+		   (cmd_buf[0] == MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM && count == 6) ||
+		   (count >= sizeof(*hdr) && hdr->payload_length == count - sizeof(*hdr))) {
+		header_len = sizeof(*hdr);
+		legacy_hdr = false;
+	} else if (cmd_buf[2] == count - 3 ||
+		   (cmd_buf[0] == MIPI_DSI_DCS_READ && count == 4)) {
+		header_len = 3;
+		legacy_hdr = true;
+	} else {
+		return -EINVAL;
+	}
+
+	msg.type = cmd_buf[0];
+	payload = cmd_buf + header_len;
+
+	if (msg.type == MIPI_DSI_DCS_READ ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM) {
+		msg.rx_len = cmd_buf[2];
+		msg.rx_buf = dsi2->rx_buf;
+		msg.tx_len = count - header_len;
+		msg.tx_buf = &cmd_buf[count - msg.tx_len];
+		dsi2->rx_len = 0;
+		dsi2->data_ready = false;
+	} else {
+		msg.tx_len = cmd_buf[2];
+		msg.tx_buf = payload;
+	}
+
+	msg.flags = legacy_hdr ? MIPI_DSI_MSG_USE_LPM :
+		    (hdr->flags & 0x1) ? MIPI_DSI_MSG_USE_LPM : 0;
+
+	ret = dw_mipi_dsi2_transfer(dsi2, &msg);
+	if (ret < 0)
+		return ret;
+
+	if (msg.type == MIPI_DSI_DCS_READ ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_0_PARAM ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_1_PARAM ||
+	    msg.type == MIPI_DSI_GENERIC_READ_REQUEST_2_PARAM) {
+		dsi2->rx_len = msg.rx_len;
+		dsi2->data_ready = true;
+	}
+
+	return 0;
+}
+
+static long dsi_raw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+{
+	struct dw_mipi_dsi2 *dsi2 = file->private_data;
+	struct dsi2_batch_req req;
+	void __user *udata;
+	u8 *buf, *p;
+	u32 i, off = 0;
+	long ret = 0;
+
+	if (cmd != DSI2_IOC_BATCH)
+		return -ENOTTY;
+
+	if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+		return -EFAULT;
+	if (!req.count || !req.len || req.len > 64 * 1024)
+		return -EINVAL;
+
+	buf = kmalloc(req.len, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	udata = (void __user *)(uintptr_t)req.data;
+	if (copy_from_user(buf, udata, req.len)) {
+		kfree(buf);
+		return -EFAULT;
+	}
+
+	p = buf;
+	for (i = 0; i < req.count; i++) {
+		u32 len;
+
+		if (off + 4 > req.len)
+			break;
+		len = 4 + p[2];		/* 4 字节头 + payload */
+		if (off + len > req.len)
+			break;
+
+		ret = dsi2_do_raw_cmd(dsi2, p, len);
+		if (ret < 0) {
+			dev_err(dsi2->dev, "batch cmd %u failed: %ld\n", i, ret);
+			break;
+		}
+		p += len;
+		off += len;
+	}
+
+	kfree(buf);
+	return (ret < 0) ? ret : (long)i;
+}
+
 static const struct file_operations dsi_raw_fops = {
     .owner = THIS_MODULE,
     .open = dsi_raw_open,
     .release = dsi_raw_release,
     .read = dsi_raw_read,
     .write = dsi_raw_write,
+    .unlocked_ioctl = dsi_raw_ioctl,
 };
 static int dw_mipi_dsi2_probe(struct platform_device *pdev)
 {
