@@ -969,17 +969,15 @@ static int dcs_bl_update_status(struct backlight_device *bl)
 		len = 2;
 	}
 
-	dev_info(p->dev, "[panel-simple] send 0x51: %*ph (brightness=%u, flags=0x%02x, tx=%s)\n",
-		 len, payload, brightness, p->dcs_bl_flags,
-		 (dsi->mode_flags & MIPI_DSI_MODE_LPM) ? "LP" : "HS");
+	dev_info(p->dev, "[panel-simple] send 0x51: %*ph (brightness=%u, flags=0x%02x)\n",
+		 len, payload, brightness, p->dcs_bl_flags);
 
-	/*
-	 * 不要强制 HS：CMD(EDPI) 模式下 HS 命令偶发被静默丢弃（实测 ~1~2%，
-	 * 驱动无法感知），而 LP 命令 100% 可靠（1200+ 次 0 失败）。
-	 * 保持 mode_flags 原样，让 DRM 核心按 MIPI_DSI_MODE_LPM 走 LP。
-	 */
+	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
+
 	ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_DISPLAY_BRIGHTNESS,
 				 payload, len);
+
+	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
 
 	return ret < 0 ? ret : 0;
 }
