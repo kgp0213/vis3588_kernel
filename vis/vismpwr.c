@@ -24,6 +24,7 @@ struct command {
     int is_read;        //读写标志
     int dev_num;        // 0/1，-1 表示同时写 dsi0+dsi1
     int use_lpm;        // 1: LP模式(默认) 0: HS模式
+    int batch;          // 1: 批量文件模式
     unsigned char read_len;  // 用于读 模式下的读取长度（1字节）
     unsigned char read_reg;  //用于读 模式下的读取长度  寄存器地址（1字节）
     unsigned char data[MAX_DATA_LEN]; // 数据内容 写模式下包含data_type/flags 在内容数据
@@ -101,7 +102,15 @@ int parse_args(int argc, char *argv[], struct command *cmd) {
             cmd->use_lpm = 1;
             data_start++;
         }
+        else if (strcmp(argv[i], "-f") == 0 && i + 1 < argc) {
+            cmd->batch = 1;
+            data_start += 2;
+            i++;
+        }
     }
+
+    if (cmd->batch)
+        return 0;
 
     if (!cmd->is_read && argc - data_start < 3) {
         fprintf(stderr, "Write cmd needs at least data_type delay payload_len\n");
@@ -179,23 +188,15 @@ static int is_transient_error(int err)
     return err == ETIMEDOUT || err == EBUSY || err == EAGAIN || err == EINTR;
 }
 
-int execute_command(const char *dev_path, const void *cmd, int count) {
-    int fd = open(dev_path, O_RDWR);
-    if (fd < 0) {
-        fprintf(stderr, "open %s failed: %s (%d)\n",
-                dev_path, strerror(errno), errno);
-        return -1;
-    }
-
+static int dev_write_fd(int fd, const char *dev_path,
+                        const void *cmd, int count) {
     int attempt = 0;
     int delay = RETRY_DELAY_MS;
 
     for (;;) {
         ssize_t n = write(fd, cmd, count);
-        if (n == count) {
-            close(fd);
+        if (n == count)
             return 0;
-        }
 
         int err = (n < 0) ? errno : 0;
 
@@ -219,8 +220,22 @@ int execute_command(const char *dev_path, const void *cmd, int count) {
         delay *= 2;
     }
 
-    close(fd);
     return -1;
+}
+
+int execute_command(const char *dev_path, const void *cmd, int count) {
+    int fd = open(dev_path, O_RDWR);
+    int ret;
+
+    if (fd < 0) {
+        fprintf(stderr, "open %s failed: %s (%d)\n",
+                dev_path, strerror(errno), errno);
+        return -1;
+    }
+
+    ret = dev_write_fd(fd, dev_path, cmd, count);
+    close(fd);
+    return ret;
 }
 
 int write_register(struct command *cmd) {
@@ -339,12 +354,108 @@ int read_register(struct command *cmd) {
     return 0;
 }
 
+/*
+ * 批量模式：每行一条命令，格式与命令行一致
+ *     data_type delay payload_len payload...
+ * 空行和 # 开头的行忽略。全局 -hs/-lp/-0/-1 对整个文件生效。
+ * 一次 open，避免每条命令都 fork/exec + open/close。
+ */
+static int batch_from_file(const char *path, struct command *proto) {
+    FILE *f = fopen(path, "r");
+    char line[1024];
+    char dev_path[32];
+    unsigned char tx_buf[MAX_DATA_LEN + 4];
+    int fd, lineno = 0, ok = 0, fail = 0;
+
+    if (!f) {
+        fprintf(stderr, "open %s failed: %s (%d)\n",
+                path, strerror(errno), errno);
+        return -1;
+    }
+
+    snprintf(dev_path, sizeof(dev_path), "/dev/mipi_dsi%d", proto->dev_num);
+    fd = open(dev_path, O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "open %s failed: %s (%d)\n",
+                dev_path, strerror(errno), errno);
+        fclose(f);
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line, *tok;
+        int dt, delay, plen, i, total;
+
+        lineno++;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\0' || *p == '\n' || *p == '#' || *p == '\r')
+            continue;
+
+        tok = strtok(p, " \t\r\n");
+        if (!tok) continue;
+        dt = parse_hex_byte(tok);
+        tok = strtok(NULL, " \t\r\n"); if (!tok) continue;
+        delay = parse_hex_byte(tok);
+        tok = strtok(NULL, " \t\r\n"); if (!tok) continue;
+        plen = parse_hex_byte(tok);
+
+        if (dt < 0 || delay < 0 || plen <= 0) {
+            fprintf(stderr, "line %d: bad header\n", lineno);
+            fail++;
+            continue;
+        }
+
+        tx_buf[0] = (unsigned char)dt;
+        tx_buf[1] = (unsigned char)delay;
+        tx_buf[2] = (unsigned char)plen;
+
+        if (proto->use_lpm) {
+            total = 3 + plen;
+            for (i = 0; i < plen; i++) {
+                tok = strtok(NULL, " \t\r\n");
+                if (!tok || parse_hex_byte(tok) < 0) {
+                    fprintf(stderr, "line %d: bad payload\n", lineno);
+                    break;
+                }
+                tx_buf[3 + i] = parse_hex_byte(tok);
+            }
+            if (i != plen) { fail++; continue; }
+        } else {
+            total = 4 + plen;
+            tx_buf[3] = 0;      /* HS: flags=0 */
+            for (i = 0; i < plen; i++) {
+                tok = strtok(NULL, " \t\r\n");
+                if (!tok || parse_hex_byte(tok) < 0) {
+                    fprintf(stderr, "line %d: bad payload\n", lineno);
+                    break;
+                }
+                tx_buf[4 + i] = parse_hex_byte(tok);
+            }
+            if (i != plen) { fail++; continue; }
+        }
+
+        if (dev_write_fd(fd, dev_path, tx_buf, total) < 0) {
+            fprintf(stderr, "line %d: write failed\n", lineno);
+            fail++;
+        } else {
+            ok++;
+        }
+    }
+
+    close(fd);
+    fclose(f);
+    printf("batch done: %d ok, %d failed\n", ok, fail);
+    return fail ? -1 : 0;
+}
+
 void print_usage() {
     printf("Usage:\n");
     printf("  Write: vismpwr [-0|-1|-b] [-lp|-hs] data_type delay payload_len payload...\n");
     printf("    e.g. vismpwr -hs 29 00 03 51 12 34\n");
     printf("    e.g. vismpwr -b -hs 29 00 03 51 12 34\n");
     printf("    default write mode is LP; add -hs to send in HS mode\n");
+    printf("  Batch: vismpwr [-0|-1] [-lp|-hs] -f <file>   (one command per line)\n");
     printf("  Read: vismpwr -r [-0|-1] [-lp|-hs] read_len read_reg\n");
     printf("    read does not support -b/--both\n");
     printf("    e.g. vismpwr -r 02 51          (LP read)\n");
@@ -358,6 +469,15 @@ void print_version() {
 int main(int argc, char *argv[]) {
     struct command cmd;
     int ret;
+    const char *batch_file = NULL;
+    int i;
+
+    for (i = 1; i < argc - 1; i++) {
+        if (strcmp(argv[i], "-f") == 0) {
+            batch_file = argv[i + 1];
+            break;
+        }
+    }
 
     if (argc >= 2 && (strcmp(argv[1], "-v") == 0 || strcmp(argv[1], "--version") == 0)) {
         print_version();
@@ -372,5 +492,8 @@ int main(int argc, char *argv[]) {
         print_usage();
         return 1;
     }
+    if (batch_file)
+        return batch_from_file(batch_file, &cmd) == 0 ? 0 : 1;
+
     return cmd.is_read ? read_register(&cmd) : write_register(&cmd);
 }
