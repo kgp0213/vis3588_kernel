@@ -1501,9 +1501,10 @@ static int panel_simple_of_get_firmware_desc_data_binfile(const char *file_path,
 		desc_dsi->bl_version = (other_info_data[14] >> 4) & 0x0f;
 
 		dev_info(dev,
-			 "[panel-simple] other_info brightness: max=0x%04x flags=0x%02x ver=%u\n",
+			 "[panel-simple] other_info brightness: max=0x%04x flags=0x%02x ver=%u, raw: %*ph\n",
 			 desc_dsi->bl_max_brightness, desc_dsi->bl_flags,
-			 desc_dsi->bl_version);
+			 desc_dsi->bl_version,
+			 (int)header->other_info_entry.length, other_info_data);
 	}
 	format_type = other_info_data[4];
 	lanes = other_info_data[5];
@@ -2027,13 +2028,16 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 		bool has_bin_init = false, has_bin_max = false;
 		u16 bin_init_br = 0, bin_max_br = 0;
 		bool has_dt_br, has_dt_max;
+		u32 dt_br_val = 0, dt_max_val = 0;
 
 		has_dt_max = !of_property_read_u32(dev->of_node,
 						   "dcs-backlight-max-brightness",
-						   &dcs_bl_max_brightness);
+						   &dt_max_val);
 		has_dt_br = !of_property_read_u32(dev->of_node,
 						  "dcs-backlight-brightness",
-						  &dcs_bl_brightness);
+						  &dt_br_val);
+		dcs_bl_max_brightness = dt_max_val;
+		dcs_bl_brightness = dt_br_val;
 
 		if (pdesc) {
 			has_bin_init = panel_simple_dsi_parse_brightness(dev, pdesc,
@@ -2089,14 +2093,18 @@ static int panel_simple_dsi_probe(struct mipi_dsi_device *dsi)
 			bl_name = dev_name(dev);
 
 		dev_info(dev,
+			 "[panel-simple] dcs backlight cfg: send_brightness=%d name=%s\n",
+			 panel->dcs_bl_send_brightness, bl_name);
+		dev_info(dev,
 			 "[panel-simple] dcs backlight: name=%s brightness=%u max=%u flags=0x%02x\n",
 			 bl_name, dcs_bl_brightness, dcs_bl_max_brightness,
 			 panel->dcs_bl_flags);
 		dev_info(dev,
-			 "[panel-simple] brightness source: 0x51=%s(0x%04x) other_info_max=%s(0x%04x) dt_brightness=%s dt_max=%s\n",
+			 "[panel-simple] brightness source: 0x51=%s(0x%04x) other_info_max=%s(0x%04x) dt_brightness=%s(0x%04x) dt_max=%s(0x%04x)\n",
 			 has_bin_init ? "bin" : "none", bin_init_br,
 			 has_bin_max ? "bin" : "none", bin_max_br,
-			 has_dt_br ? "yes" : "no", has_dt_max ? "yes" : "no");
+			 has_dt_br ? "dt" : "none", dt_br_val,
+			 has_dt_max ? "dt" : "none", dt_max_val);
 
 		memset(&props, 0, sizeof(props));
 		props.type = BACKLIGHT_RAW;
